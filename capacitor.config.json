@@ -1,0 +1,6 @@
+{
+  "appId": "com.tania.calculator",
+  "appName": "Vue Calculator",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
