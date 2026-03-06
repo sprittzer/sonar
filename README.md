@@ -1,17 +1,8 @@
-# HEX Mesh Messenger (Android)
+# HEX Mesh Messenger
 
-Децентрализованная схема без центрального сервера:
-- mDNS discovery (`_hexmesh._udp.local`)
-- UDP broadcast fallback (`HELLO` / `HELLO_ACK`)
-- Gossip relay (`msgId`, `from`, `to`, `ttl`, `type`, `payload`, `sig`)
-- Mesh-signaling для WebRTC (`SIGNAL_OFFER`, `SIGNAL_ANSWER`, `SIGNAL_ICE`)
-
-## Требования
-
-- Android устройство
-- JDK 21
-- Android SDK
-- Node.js
+Одна кодовая база, два режима:
+- Android APK: нативный mesh plugin (mDNS + UDP + gossip)
+- Browser: локальный helper bridge, который использует ту же сеть (mDNS + UDP + gossip)
 
 ## Установка
 
@@ -19,15 +10,32 @@
 npm install
 ```
 
-## Web preview (ограниченный)
+## Browser test через helper
+
+1. Запусти helper:
+
+```bash
+npm run bridge:mesh
+```
+
+По умолчанию bridge поднимает WebSocket на `ws://127.0.0.1:8788`.
+Для mDNS в helper (опционально) можно установить:
+
+```bash
+npm install bonjour-service
+```
+
+Без этого будет работать UDP discovery fallback (`HELLO/HELLO_ACK`).
+
+2. Запусти web UI:
 
 ```bash
 npm run dev
 ```
 
-Важно: discovery/mesh transport работают только в Android APK (нативный Capacitor plugin).
+3. Открой `http://localhost:6001`, в блоке Node оставь bridge URL `ws://127.0.0.1:8788`, нажми `Старт mesh`.
 
-## Сборка APK
+## Android APK
 
 ```bash
 npm run android:apk
@@ -39,15 +47,10 @@ APK:
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Использование
+## Протокол
 
-1. Установи APK минимум на 2 устройства в одной Wi-Fi сети.
-2. На каждом устройстве нажми `Старт mesh`.
-3. Дождись появления узлов в списке `Найденные узлы`.
-4. Выбери узел, пиши в чат (gossip packets).
-5. Для звонка включи AV и нажми `Позвонить выбранному узлу`.
-
-## Примечания
-
-- mDNS в некоторых сетях блокируется, поэтому включен UDP fallback.
-- Gossip использует `ttl` и `seen-cache` для anti-loop/dedup.
+- discovery: mDNS (`_hexmesh._udp.local`) + UDP `HELLO/HELLO_ACK`
+- gossip envelope: `msgId, from, to, ttl, type, payload, sig`
+- dedup: `seen-cache`
+- relay: multi-hop через `ttl`
+- WebRTC signaling: `SIGNAL_OFFER`, `SIGNAL_ANSWER`, `SIGNAL_ICE`

@@ -1,24 +1,32 @@
 <template>
   <main class="page">
     <section class="panel">
-      <h1>HEX Mesh (No Central Server)</h1>
-      <p class="muted">mDNS + UDP discovery, gossip relay, mesh-signaling для WebRTC.</p>
+      <h1>HEX Mesh Chat</h1>
+      <p class="muted">Постоянный профиль пользователя, авто-обнаружение узлов, отдельный чат на каждого пользователя.</p>
 
       <div class="grid">
         <section class="card">
-          <h2>1) Узел mesh</h2>
+          <h2>1) Профиль и mesh</h2>
           <div class="row">
-            <input v-model.trim="localName" class="input" placeholder="Имя узла" />
-            <input v-model.trim="nodeId" class="input" placeholder="nodeId" />
+            <input v-model.trim="localName" class="input" placeholder="Твой ник" />
+            <input v-model.trim="nodeId" class="input" placeholder="user id" />
           </div>
+          <p class="small">Ник и user id сохраняются на устройстве.</p>
+
+          <div v-if="!isNative" class="row">
+            <input v-model.trim="bridgeUrl" class="input" placeholder="ws://127.0.0.1:8788" />
+          </div>
+
           <div class="row">
             <button class="btn" @click="startMesh">Старт mesh</button>
             <button class="btn danger" @click="stopMesh">Стоп mesh</button>
           </div>
+
+          <p class="status">Mode: <strong>{{ isNative ? 'native-apk' : 'browser-bridge' }}</strong></p>
           <p class="status">Mesh: <strong>{{ meshState }}</strong></p>
           <p v-if="meshError" class="error">{{ meshError }}</p>
 
-          <h3>Найденные узлы</h3>
+          <h3>Пользователи в сети</h3>
           <div class="peer-list">
             <button
               v-for="peer in peers"
@@ -27,47 +35,57 @@
               :class="{ active: selectedPeerId === peer.nodeId }"
               @click="selectedPeerId = peer.nodeId"
             >
-              {{ peer.nodeId.slice(0, 8) }} • {{ peer.address }}:{{ peer.port }}
+              <div><strong>{{ peer.displayName || peer.nodeId }}</strong></div>
+              <div class="small">{{ peer.nodeId.slice(0, 8) }} • {{ peer.address }}:{{ peer.port }}</div>
             </button>
-            <div v-if="peers.length === 0" class="placeholder">Пока узлы не найдены.</div>
+            <div v-if="peers.length === 0" class="placeholder">Пользователи не найдены.</div>
           </div>
         </section>
 
         <section class="card">
-          <h2>2) Gossip чат</h2>
-          <p class="small">Сообщения идут через mesh-пакеты (ttl + dedup), даже через ретрансляторы.</p>
+          <h2>2) Чат</h2>
+          <p class="small">Текущий собеседник: <strong>{{ selectedPeerLabel }}</strong></p>
+
           <div class="chat-box">
-            <div v-for="item in messages" :key="item.localKey" :class="['msg', item.outgoing ? 'out' : 'in']">
+            <div v-for="item in activeMessages" :key="item.localKey" :class="['msg', item.outgoing ? 'out' : 'in']">
               <div class="meta">{{ item.outgoing ? 'Ты' : item.from }} • {{ formatTime(item.ts) }}</div>
               <div>{{ item.text }}</div>
             </div>
-            <div v-if="messages.length === 0" class="placeholder">Нет сообщений.</div>
+            <div v-if="activeMessages.length === 0" class="placeholder">Нет сообщений в этом чате.</div>
           </div>
+
           <div class="row">
-            <input v-model="chatInput" class="input" placeholder="Сообщение" @keyup.enter="sendChat" />
-            <button class="btn" @click="sendChat">Отправить</button>
+            <input
+              v-model="chatInput"
+              class="input"
+              placeholder="Сообщение"
+              @keyup.enter="sendChat"
+              :disabled="!selectedPeerId"
+            />
+            <button class="btn" @click="sendChat" :disabled="!selectedPeerId">Отправить</button>
           </div>
         </section>
 
         <section class="card">
-          <h2>3) WebRTC звонок (mesh-signaling)</h2>
+          <h2>3) AV звонок</h2>
           <div class="row">
             <button class="btn" @click="startMedia">Включить AV</button>
             <button class="btn danger" @click="stopMedia">Выключить AV</button>
-            <button class="btn" @click="startCall">Позвонить выбранному узлу</button>
+            <button class="btn" @click="startCall" :disabled="!selectedPeerId">Позвонить</button>
           </div>
-          <p class="status">RTC: <strong>{{ rtcState }}</strong> | active peer: <strong>{{ selectedPeerId || '-' }}</strong></p>
+
+          <p class="status">RTC: <strong>{{ rtcState }}</strong> | peer: <strong>{{ selectedPeerId || '-' }}</strong></p>
           <p v-if="mediaError" class="error">{{ mediaError }}</p>
 
           <div class="video-grid">
             <div>
-              <p class="small">Локальное</p>
+              <p class="small">Local</p>
               <div class="video-wrap">
                 <video ref="localVideoRef" class="video mirror" autoplay muted playsinline></video>
               </div>
             </div>
             <div>
-              <p class="small">Удаленное</p>
+              <p class="small">Remote</p>
               <div class="video-wrap">
                 <video ref="remoteVideoRef" class="video" autoplay playsinline></video>
               </div>
@@ -81,32 +99,62 @@
 
 <script setup>
 import { Capacitor } from '@capacitor/core'
-import { onBeforeUnmount, ref } from 'vue'
-import Mesh from './mesh'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { createMeshTransport } from './meshTransport'
 
-const localName = ref('User')
-const nodeId = ref(`n-${Math.random().toString(16).slice(2, 10)}`)
+const isNative = Capacitor.isNativePlatform()
+const STORAGE_KEY = 'hex_mesh_profile_v1'
+
+function loadProfile() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function saveProfile(profile) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(profile))
+}
+
+const persisted = loadProfile()
+const localName = ref(persisted?.localName || 'User')
+const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2, 10)}`)
+const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
+
+watch([localName, nodeId, bridgeUrl], () => {
+  saveProfile({
+    localName: localName.value,
+    nodeId: nodeId.value,
+    bridgeUrl: bridgeUrl.value
+  })
+})
+
 const meshState = ref('stopped')
 const meshError = ref('')
-
 const peers = ref([])
 const selectedPeerId = ref('')
 
 const chatInput = ref('')
-const messages = ref([])
+const chatsByPeer = ref({})
+
+const rtcState = ref('new')
+const mediaError = ref('')
 
 const localVideoRef = ref(null)
 const remoteVideoRef = ref(null)
 const localStream = ref(null)
 const remoteStream = ref(new MediaStream())
-const mediaError = ref('')
 
-const rtcState = ref('new')
-
+let mesh = null
 let pc = null
-let peerListener = null
-let packetListener = null
 const seen = new Set()
+
+const selectedPeer = computed(() => peers.value.find((p) => p.nodeId === selectedPeerId.value) || null)
+const selectedPeerLabel = computed(() => selectedPeer.value?.displayName || selectedPeer.value?.nodeId || '-')
+const activeMessages = computed(() => chatsByPeer.value[selectedPeerId.value] || [])
 
 function nextMsgId(prefix = 'm') {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
@@ -116,111 +164,108 @@ function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function pushChat(peerId, msg) {
+  if (!peerId) return
+  if (!chatsByPeer.value[peerId]) {
+    chatsByPeer.value[peerId] = []
+  }
+  chatsByPeer.value[peerId].push(msg)
+}
+
 async function startMesh() {
   meshError.value = ''
 
-  if (!Capacitor.isNativePlatform()) {
-    meshError.value = 'Mesh discovery доступен в Android APK (нативный плагин), не в браузере.'
+  if (!localName.value.trim()) {
+    meshError.value = 'Укажи ник.'
+    return
+  }
+  if (!nodeId.value.trim()) {
+    meshError.value = 'Укажи user id.'
     return
   }
 
   try {
-    await stopMeshListeners()
+    await stopMesh()
 
-    await Mesh.start({
+    mesh = createMeshTransport({
       nodeId: nodeId.value,
-      udpPort: 41234,
-      capabilities: ['chat', 'signal', 'av']
-    })
+      displayName: localName.value,
+      capabilities: ['chat', 'signal', 'av'],
+      bridgeUrl: bridgeUrl.value,
+      onPeers(nextPeers) {
+        peers.value = nextPeers || []
 
-    peerListener = await Mesh.addListener('peersUpdate', (event) => {
-      peers.value = event.peers || []
-      if (!selectedPeerId.value && peers.value.length > 0) {
-        selectedPeerId.value = peers.value[0].nodeId
-      }
-      if (selectedPeerId.value && !peers.value.some((p) => p.nodeId === selectedPeerId.value)) {
-        selectedPeerId.value = ''
-      }
-    })
+        if (!selectedPeerId.value && peers.value.length) {
+          selectedPeerId.value = peers.value[0].nodeId
+        }
 
-    packetListener = await Mesh.addListener('meshPacket', (event) => {
-      if (!event?.envelope) return
-      try {
-        const envelope = JSON.parse(event.envelope)
+        if (selectedPeerId.value && !peers.value.some((p) => p.nodeId === selectedPeerId.value)) {
+          selectedPeerId.value = ''
+        }
+      },
+      onPacket(envelope) {
         onMeshEnvelope(envelope)
-      } catch {
-        // ignore
+      },
+      onState(state) {
+        meshState.value = state
+      },
+      onError(message) {
+        meshError.value = message
       }
     })
 
-    const peersRes = await Mesh.getPeers()
-    peers.value = peersRes.peers || []
-
-    meshState.value = 'running'
+    await mesh.start()
   } catch (error) {
-    meshError.value = `Не удалось запустить mesh: ${error?.message || 'unknown'}`
+    meshError.value = `Mesh start error: ${error?.message || 'unknown'}`
     meshState.value = 'error'
   }
 }
 
-async function stopMeshListeners() {
-  if (peerListener) {
-    await peerListener.remove()
-    peerListener = null
-  }
-  if (packetListener) {
-    await packetListener.remove()
-    packetListener = null
-  }
-}
-
 async function stopMesh() {
-  try {
-    await stopMeshListeners()
-    await Mesh.stop()
-  } catch {
-    // ignore
+  if (mesh) {
+    await mesh.stop()
+    mesh = null
   }
-  meshState.value = 'stopped'
   peers.value = []
+  meshState.value = 'stopped'
 }
 
 async function sendEnvelope(envelope) {
-  if (!Capacitor.isNativePlatform()) return
-  await Mesh.sendPacket({ envelope })
+  if (!mesh) throw new Error('Mesh is not running')
+  await mesh.sendPacket(envelope)
 }
 
 async function sendChat() {
   const text = chatInput.value.trim()
-  if (!text) return
+  if (!text || !selectedPeerId.value) return
 
-  const envelope = {
+  const env = {
     msgId: nextMsgId('chat'),
     from: nodeId.value,
-    to: selectedPeerId.value || '*',
+    to: selectedPeerId.value,
     ttl: 8,
     type: 'CHAT',
     payload: {
       text,
       ts: Date.now(),
-      fromName: localName.value || 'User'
+      fromName: localName.value || nodeId.value
     },
     sig: ''
   }
 
-  messages.value.push({
-    localKey: `${envelope.msgId}-out`,
+  pushChat(selectedPeerId.value, {
+    localKey: `${env.msgId}-out`,
     text,
-    ts: envelope.payload.ts,
+    ts: env.payload.ts,
     from: localName.value || nodeId.value,
     outgoing: true
   })
 
   chatInput.value = ''
-  await sendEnvelope(envelope)
+  await sendEnvelope(env)
 }
 
-function ensurePeerConnection(peerId) {
+function ensurePc(peerId) {
   if (pc) return
 
   pc = new RTCPeerConnection({
@@ -228,14 +273,12 @@ function ensurePeerConnection(peerId) {
   })
 
   rtcState.value = pc.connectionState
-
   pc.onconnectionstatechange = () => {
     rtcState.value = pc.connectionState
   }
 
   pc.onicecandidate = async (event) => {
     if (!event.candidate || !peerId) return
-
     await sendEnvelope({
       msgId: nextMsgId('sig'),
       from: nodeId.value,
@@ -256,22 +299,20 @@ function ensurePeerConnection(peerId) {
   }
 
   if (localStream.value) {
-    const senders = new Set(pc.getSenders().map((s) => s.track?.id).filter(Boolean))
+    const existing = new Set(pc.getSenders().map((s) => s.track?.id).filter(Boolean))
     localStream.value.getTracks().forEach((track) => {
-      if (!senders.has(track.id)) {
-        pc.addTrack(track, localStream.value)
-      }
+      if (!existing.has(track.id)) pc.addTrack(track, localStream.value)
     })
   }
 }
 
 async function startCall() {
   if (!selectedPeerId.value) {
-    meshError.value = 'Выбери узел для звонка.'
+    meshError.value = 'Выбери пользователя для звонка.'
     return
   }
 
-  ensurePeerConnection(selectedPeerId.value)
+  ensurePc(selectedPeerId.value)
 
   try {
     const offer = await pc.createOffer()
@@ -287,20 +328,19 @@ async function startCall() {
       sig: ''
     })
   } catch (error) {
-    meshError.value = `Ошибка старта звонка: ${error?.message || 'unknown'}`
+    meshError.value = `Call start error: ${error?.message || 'unknown'}`
   }
 }
 
 async function onMeshEnvelope(envelope) {
   if (!envelope?.msgId || seen.has(envelope.msgId)) return
   seen.add(envelope.msgId)
-  if (seen.size > 8000) seen.clear()
+  if (seen.size > 10000) seen.clear()
 
-  const type = envelope.type
   const payload = envelope.payload || {}
 
-  if (type === 'CHAT') {
-    messages.value.push({
+  if (envelope.type === 'CHAT') {
+    pushChat(envelope.from, {
       localKey: `${envelope.msgId}-in`,
       text: payload.text || '',
       ts: payload.ts || Date.now(),
@@ -310,9 +350,9 @@ async function onMeshEnvelope(envelope) {
     return
   }
 
-  if (type === 'SIGNAL_OFFER') {
+  if (envelope.type === 'SIGNAL_OFFER') {
     selectedPeerId.value = envelope.from
-    ensurePeerConnection(envelope.from)
+    ensurePc(envelope.from)
 
     try {
       await pc.setRemoteDescription(payload.sdp)
@@ -329,29 +369,27 @@ async function onMeshEnvelope(envelope) {
         sig: ''
       })
     } catch (error) {
-      meshError.value = `Ошибка обработки offer: ${error?.message || 'unknown'}`
+      meshError.value = `Offer process error: ${error?.message || 'unknown'}`
     }
     return
   }
 
-  if (type === 'SIGNAL_ANSWER') {
+  if (envelope.type === 'SIGNAL_ANSWER') {
     try {
-      ensurePeerConnection(envelope.from)
+      ensurePc(envelope.from)
       await pc.setRemoteDescription(payload.sdp)
     } catch (error) {
-      meshError.value = `Ошибка обработки answer: ${error?.message || 'unknown'}`
+      meshError.value = `Answer process error: ${error?.message || 'unknown'}`
     }
     return
   }
 
-  if (type === 'SIGNAL_ICE') {
+  if (envelope.type === 'SIGNAL_ICE') {
     try {
-      ensurePeerConnection(envelope.from)
-      if (payload.candidate) {
-        await pc.addIceCandidate(payload.candidate)
-      }
+      ensurePc(envelope.from)
+      if (payload.candidate) await pc.addIceCandidate(payload.candidate)
     } catch {
-      // race condition, можно игнорировать
+      // race during startup
     }
   }
 }
@@ -360,7 +398,7 @@ async function startMedia() {
   mediaError.value = ''
   if (localStream.value) return
 
-  const videoConstraints = {
+  const video = {
     facingMode: { ideal: 'user' },
     width: { ideal: 1280 },
     height: { ideal: 720 },
@@ -370,16 +408,10 @@ async function startMedia() {
   try {
     let stream
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: true
-      })
+      stream = await navigator.mediaDevices.getUserMedia({ video, audio: true })
     } catch (avError) {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: false
-      })
-      mediaError.value = `Аудио недоступно: ${avError?.name || 'Error'}: ${avError?.message || 'unknown'}`
+      stream = await navigator.mediaDevices.getUserMedia({ video, audio: false })
+      mediaError.value = `Audio disabled: ${avError?.name || 'Error'}: ${avError?.message || 'unknown'}`
     }
 
     localStream.value = stream
@@ -389,16 +421,14 @@ async function startMedia() {
       await localVideoRef.value.play()
     }
 
-    if (pc && selectedPeerId.value) {
+    if (pc) {
       const existing = new Set(pc.getSenders().map((s) => s.track?.id).filter(Boolean))
       stream.getTracks().forEach((track) => {
-        if (!existing.has(track.id)) {
-          pc.addTrack(track, stream)
-        }
+        if (!existing.has(track.id)) pc.addTrack(track, stream)
       })
     }
   } catch (error) {
-    mediaError.value = `Не удалось включить AV: ${error?.name || 'Error'}: ${error?.message || 'unknown'}`
+    mediaError.value = `AV start failed: ${error?.name || 'Error'}: ${error?.message || 'unknown'}`
   }
 }
 
