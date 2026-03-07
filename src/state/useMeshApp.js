@@ -42,10 +42,10 @@ const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2,
 const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
 const normalizedTransport = persisted?.transportMode === 'ble' ? 'bluetooth' : persisted?.transportMode
 const transportMode = ref(normalizedTransport || 'hybrid')
-const stunUrl = ref(persisted?.stunUrl || 'stun:stun.l.google.com:19302')
-const turnUrl = ref(persisted?.turnUrl || 'turn:openrelay.metered.ca:80')
-const turnUsername = ref(persisted?.turnUsername || 'openrelayproject')
-const turnCredential = ref(persisted?.turnCredential || 'openrelayproject')
+const stunUrl = ref(persisted?.stunUrl || 'stun:stun.freeswitch.org:3478')
+const turnUrl = ref(persisted?.turnUrl || 'turn:155.212.168.250.3478?transport=udp')
+const turnUsername = ref(persisted?.turnUsername || 'test')
+const turnCredential = ref(persisted?.turnCredential || 'secret')
 
 watch(encryptionByThread, () => saveJson(ENCRYPTION_PREFS_KEY, encryptionByThread.value), { deep: true })
 watch([localName, nodeId, bridgeUrl, transportMode, stunUrl, turnUrl, turnUsername, turnCredential], () => {
