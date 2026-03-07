@@ -27,14 +27,14 @@ npm install bonjour-service
 
 Без этого будет работать UDP discovery fallback (`HELLO/HELLO_ACK`).
 
-BLE helper (desktop Bluetooth discovery + data):
+Bluetooth helper (desktop Bluetooth discovery + data):
 
 ```bash
 npm install @abandonware/noble @abandonware/bleno
 npm run bridge:ble
 ```
 
-Для BLE helper в UI укажи bridge URL: `ws://127.0.0.1:8790`.
+Для Bluetooth helper в UI укажи bridge URL: `ws://127.0.0.1:8790`, transport = `bluetooth`.
 
 2. Запусти web UI:
 

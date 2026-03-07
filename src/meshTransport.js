@@ -76,11 +76,12 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
       return new Promise((resolve, reject) => {
         ws = new WebSocket(bridgeUrl)
 
+        const normalizedTransport = transportMode === 'ble' ? 'bluetooth' : (transportMode || 'hybrid')
         ws.onopen = () => {
           ws.send(
             JSON.stringify({
               action: 'start',
-              payload: { nodeId, displayName, capabilities, transport: transportMode || 'hybrid' }
+              payload: { nodeId, displayName, capabilities, transport: normalizedTransport }
             })
           )
           ws.send(JSON.stringify({ action: 'getPeers' }))

@@ -344,7 +344,7 @@ async function startMesh(params = {}) {
   await startNobleCentral()
 
   running = true
-  emit('state', { state: 'running', nodeId, transport: 'ble' })
+  emit('state', { state: 'running', nodeId, transport: 'bluetooth' })
 }
 
 async function stopMesh() {
@@ -378,7 +378,7 @@ const wss = new WebSocketServer({ port: WS_PORT })
 
 wss.on('connection', (ws) => {
   clients.add(ws)
-  ws.send(JSON.stringify({ event: 'state', payload: { state: running ? 'running' : 'stopped', nodeId, transport: 'ble' } }))
+  ws.send(JSON.stringify({ event: 'state', payload: { state: running ? 'running' : 'stopped', nodeId, transport: 'bluetooth' } }))
   ws.send(JSON.stringify({ event: 'peersUpdate', payload: { peers: peersArray() } }))
 
   ws.on('message', (raw) => {

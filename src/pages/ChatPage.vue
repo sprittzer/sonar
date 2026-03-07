@@ -17,6 +17,18 @@
           {{ secureStatusText }}
         </span>
       </div>
+      <div v-if="chatType === 'peer'" class="call-controls">
+        <button v-if="peerCallState === 'idle'" class="btn" @click="startCall">Видео звонок</button>
+        <button v-if="isIncomingRinging" class="btn" @click="acceptCall">Принять</button>
+        <button v-if="isIncomingRinging" class="btn danger" @click="rejectCall">Отклонить</button>
+        <button v-if="canEndCall" class="btn danger" @click="endCall">Завершить</button>
+        <span class="secure-status" :class="`status-${peerCallState}`">{{ callStatusText }}</span>
+      </div>
+      <div v-if="chatType === 'peer' && (localCallStream || remoteCallStream)" class="call-videos">
+        <video ref="remoteVideoRef" class="video remote" autoplay playsinline></video>
+        <video ref="localVideoRef" class="video local" autoplay muted playsinline></video>
+      </div>
+      <p v-if="peerCallError" class="send-error">{{ peerCallError }}</p>
       <p v-if="sendError" class="send-error">{{ sendError }}</p>
     </div>
 
@@ -71,12 +83,24 @@ const {
   setThreadEncryption,
   getHandshakeStatusByPeer,
   getHandshakeErrorByPeer,
-  ensureE2eeForPeer
+  ensureE2eeForPeer,
+  callState,
+  callError,
+  currentCallPeerId,
+  incomingCallFrom,
+  localCallStream,
+  remoteCallStream,
+  startVideoCall,
+  acceptIncomingCall,
+  rejectIncomingCall,
+  endVideoCall
 } = useMeshApp()
 
 const threadKey = computed(() => `${props.chatType}:${props.chatId}`)
 const label = computed(() => getThreadLabel(threadKey.value))
 const messages = computed(() => getMessages(threadKey.value))
+const localVideoRef = ref(null)
+const remoteVideoRef = ref(null)
 const isEncrypted = computed(() =>
   props.chatType === 'peer' && e2eeSessions.value.has(props.chatId)
 )
@@ -96,6 +120,29 @@ const secureStatusText = computed(() => {
   }
   return 'Инициализация...'
 })
+const isPeerCallContext = computed(() =>
+  props.chatType === 'peer' && currentCallPeerId.value === props.chatId
+)
+const peerCallState = computed(() => {
+  if (props.chatType !== 'peer') return 'idle'
+  if (!isPeerCallContext.value && incomingCallFrom.value !== props.chatId) return 'idle'
+  if (incomingCallFrom.value === props.chatId && callState.value === 'ringing') return 'ringing'
+  return callState.value
+})
+const isIncomingRinging = computed(() => incomingCallFrom.value === props.chatId && callState.value === 'ringing')
+const canEndCall = computed(() => {
+  const s = peerCallState.value
+  return s === 'calling' || s === 'connecting' || s === 'in-call' || s === 'error'
+})
+const callStatusText = computed(() => {
+  if (peerCallState.value === 'ringing') return 'Входящий звонок...'
+  if (peerCallState.value === 'calling') return 'Исходящий звонок...'
+  if (peerCallState.value === 'connecting') return 'Соединение...'
+  if (peerCallState.value === 'in-call') return 'В звонке'
+  if (peerCallState.value === 'error') return 'Ошибка звонка'
+  return 'Без звонка'
+})
+const peerCallError = computed(() => (isPeerCallContext.value || isIncomingRinging.value) ? callError.value : '')
 
 watch(
   () => [props.chatType, props.chatId],
@@ -139,6 +186,42 @@ async function send() {
     sendError.value = e?.message || 'Не удалось отправить сообщение.'
   }
 }
+
+watch([localCallStream, localVideoRef], ([stream, el]) => {
+  if (el) el.srcObject = stream || null
+}, { immediate: true })
+
+watch([remoteCallStream, remoteVideoRef], ([stream, el]) => {
+  if (el) el.srcObject = stream || null
+}, { immediate: true })
+
+async function startCall() {
+  sendError.value = ''
+  try {
+    await startVideoCall(props.chatId)
+  } catch (e) {
+    sendError.value = e?.message || 'Не удалось начать звонок.'
+  }
+}
+
+async function acceptCall() {
+  sendError.value = ''
+  try {
+    await acceptIncomingCall()
+  } catch (e) {
+    sendError.value = e?.message || 'Не удалось принять звонок.'
+  }
+}
+
+async function rejectCall() {
+  sendError.value = ''
+  await rejectIncomingCall()
+}
+
+async function endCall() {
+  sendError.value = ''
+  await endVideoCall(true)
+}
 </script>
 
 <style scoped>
@@ -146,5 +229,31 @@ async function send() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.call-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.call-videos {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  background: #111827;
+  object-fit: cover;
+}
+
+.video.local {
+  transform: scaleX(-1);
 }
 </style>

@@ -7,9 +7,13 @@
       <input v-if="!isNative" v-model.trim="bridgeUrl" class="input" placeholder="ws://127.0.0.1:8788" />
       <select v-model="transportMode" class="input">
         <option value="lan">LAN (Wi-Fi)</option>
-        <option value="hybrid">Hybrid (LAN + BLE discovery)</option>
-        <option value="ble">BLE discovery only</option>
+        <option value="hybrid">Hybrid (LAN + Bluetooth discovery)</option>
+        <option value="bluetooth">Bluetooth discovery only</option>
       </select>
+      <input v-model.trim="stunUrl" class="input" placeholder="stun:stun.l.google.com:19302" />
+      <input v-model.trim="turnUrl" class="input" placeholder="turn:host:port" />
+      <input v-model.trim="turnUsername" class="input" placeholder="TURN username" />
+      <input v-model.trim="turnCredential" class="input" placeholder="TURN password" />
     </div>
 
     <div class="row">
@@ -27,5 +31,19 @@
 <script setup>
 import { useMeshApp } from '../state/useMeshApp'
 
-const { isNative, localName, nodeId, bridgeUrl, transportMode, meshState, meshError, startMesh, stopMesh } = useMeshApp()
+const {
+  isNative,
+  localName,
+  nodeId,
+  bridgeUrl,
+  transportMode,
+  stunUrl,
+  turnUrl,
+  turnUsername,
+  turnCredential,
+  meshState,
+  meshError,
+  startMesh,
+  stopMesh
+} = useMeshApp()
 </script>

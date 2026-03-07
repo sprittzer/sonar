@@ -40,15 +40,24 @@ const persisted = loadJson(PROFILE_KEY, null)
 const localName = ref(persisted?.localName || 'User')
 const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2, 10)}`)
 const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
-const transportMode = ref(persisted?.transportMode || 'hybrid')
+const normalizedTransport = persisted?.transportMode === 'ble' ? 'bluetooth' : persisted?.transportMode
+const transportMode = ref(normalizedTransport || 'hybrid')
+const stunUrl = ref(persisted?.stunUrl || 'stun:stun.l.google.com:19302')
+const turnUrl = ref(persisted?.turnUrl || 'turn:openrelay.metered.ca:80')
+const turnUsername = ref(persisted?.turnUsername || 'openrelayproject')
+const turnCredential = ref(persisted?.turnCredential || 'openrelayproject')
 
 watch(encryptionByThread, () => saveJson(ENCRYPTION_PREFS_KEY, encryptionByThread.value), { deep: true })
-watch([localName, nodeId, bridgeUrl, transportMode], () => {
+watch([localName, nodeId, bridgeUrl, transportMode, stunUrl, turnUrl, turnUsername, turnCredential], () => {
   saveJson(PROFILE_KEY, {
     localName: localName.value,
     nodeId: nodeId.value,
     bridgeUrl: bridgeUrl.value,
-    transportMode: transportMode.value
+    transportMode: transportMode.value,
+    stunUrl: stunUrl.value,
+    turnUrl: turnUrl.value,
+    turnUsername: turnUsername.value,
+    turnCredential: turnCredential.value
   })
 })
 
@@ -67,6 +76,14 @@ const seen = new Set()
 const pendingEncryptedByPeer = new Map() // peerId -> [{ envelope, label, placeholderKey }]
 let e2eeSessionListenerBound = false
 let e2eeInitPromise = null
+const callState = ref('idle') // idle|calling|ringing|connecting|in-call|error
+const callError = ref('')
+const currentCallPeerId = ref('')
+const incomingCallFrom = ref('')
+const localCallStream = ref(null)
+const remoteCallStream = ref(null)
+let peerConnection = null
+let pendingRemoteIce = []
 
 async function ensureE2eeInitialized() {
   if (e2eeInitPromise) return e2eeInitPromise
@@ -327,6 +344,7 @@ async function startMesh() {
 }
 
 async function stopMesh() {
+  await endVideoCall(false)
   if (mesh) {
     await mesh.stop()
     mesh = null
@@ -338,6 +356,222 @@ async function stopMesh() {
 async function sendEnvelope(envelope) {
   if (!mesh) throw new Error('Mesh is not running')
   await mesh.sendPacket(envelope)
+}
+
+function getIceServers() {
+  const servers = []
+  if (stunUrl.value?.trim()) {
+    servers.push({ urls: stunUrl.value.trim() })
+  }
+  if (turnUrl.value?.trim()) {
+    servers.push({
+      urls: turnUrl.value.trim(),
+      username: turnUsername.value?.trim() || '',
+      credential: turnCredential.value?.trim() || ''
+    })
+  }
+  return servers
+}
+
+async function ensureLocalMedia() {
+  if (localCallStream.value) return localCallStream.value
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'user' },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      aspectRatio: { ideal: 16 / 9 }
+    },
+    audio: true
+  })
+  localCallStream.value = stream
+  return stream
+}
+
+function stopLocalMedia() {
+  if (!localCallStream.value) return
+  for (const track of localCallStream.value.getTracks()) {
+    track.stop()
+  }
+  localCallStream.value = null
+}
+
+function closePeerConnection() {
+  if (peerConnection) {
+    peerConnection.ontrack = null
+    peerConnection.onicecandidate = null
+    peerConnection.onconnectionstatechange = null
+    peerConnection.close()
+  }
+  peerConnection = null
+  pendingRemoteIce = []
+  remoteCallStream.value = null
+}
+
+async function ensurePeerConnection(peerId) {
+  if (peerConnection && currentCallPeerId.value === peerId) return peerConnection
+  closePeerConnection()
+
+  const pc = new RTCPeerConnection({ iceServers: getIceServers() })
+  peerConnection = pc
+  currentCallPeerId.value = peerId
+
+  pc.onicecandidate = (event) => {
+    if (!event.candidate || !currentCallPeerId.value) return
+    sendEnvelope({
+      msgId: nextMsgId('ice'),
+      from: nodeId.value,
+      to: currentCallPeerId.value,
+      ttl: 8,
+      type: 'SIGNAL_ICE',
+      payload: { candidate: event.candidate },
+      sig: ''
+    }).catch((e) => {
+      callError.value = `ICE send failed: ${e?.message || 'unknown'}`
+    })
+  }
+
+  pc.ontrack = (event) => {
+    const [stream] = event.streams || []
+    if (stream) {
+      remoteCallStream.value = stream
+      callState.value = 'in-call'
+    }
+  }
+
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState
+    if (s === 'connected') {
+      callState.value = 'in-call'
+      return
+    }
+    if (s === 'failed' || s === 'disconnected' || s === 'closed') {
+      if (s === 'failed') callError.value = 'WebRTC connection failed.'
+      endVideoCall(false)
+    }
+  }
+
+  const stream = await ensureLocalMedia()
+  const existingKinds = new Set(pc.getSenders().map((s) => s.track?.kind).filter(Boolean))
+  for (const track of stream.getTracks()) {
+    if (!existingKinds.has(track.kind)) {
+      pc.addTrack(track, stream)
+    }
+  }
+
+  return pc
+}
+
+async function flushPendingRemoteIce() {
+  if (!peerConnection || !peerConnection.remoteDescription) return
+  for (const candidate of pendingRemoteIce) {
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+    } catch {
+      // ignore malformed remote candidates
+    }
+  }
+  pendingRemoteIce = []
+}
+
+async function startVideoCall(peerId) {
+  callError.value = ''
+  if (!mesh || meshState.value !== 'running') {
+    throw new Error('Mesh не запущен.')
+  }
+  if (!peerId) throw new Error('Не выбран собеседник.')
+  if (callState.value !== 'idle' && currentCallPeerId.value && currentCallPeerId.value !== peerId) {
+    throw new Error('Уже есть активный звонок с другим пользователем.')
+  }
+
+  currentCallPeerId.value = peerId
+  callState.value = 'calling'
+  await sendEnvelope({
+    msgId: nextMsgId('callreq'),
+    from: nodeId.value,
+    to: peerId,
+    ttl: 8,
+    type: 'CALL_REQUEST',
+    payload: { ts: Date.now() },
+    sig: ''
+  })
+}
+
+async function acceptIncomingCall() {
+  const peerId = incomingCallFrom.value
+  if (!peerId) return
+  callError.value = ''
+  try {
+    await ensurePeerConnection(peerId)
+    callState.value = 'connecting'
+    incomingCallFrom.value = ''
+
+    await sendEnvelope({
+      msgId: nextMsgId('callacc'),
+      from: nodeId.value,
+      to: peerId,
+      ttl: 8,
+      type: 'CALL_ACCEPT',
+      payload: { ts: Date.now() },
+      sig: ''
+    })
+
+    const offer = await peerConnection.createOffer()
+    await peerConnection.setLocalDescription(offer)
+    await sendEnvelope({
+      msgId: nextMsgId('offer'),
+      from: nodeId.value,
+      to: peerId,
+      ttl: 8,
+      type: 'SIGNAL_OFFER',
+      payload: { sdp: offer },
+      sig: ''
+    })
+  } catch (e) {
+    callState.value = 'error'
+    callError.value = e?.message || 'Не удалось принять звонок.'
+  }
+}
+
+async function rejectIncomingCall() {
+  const peerId = incomingCallFrom.value
+  incomingCallFrom.value = ''
+  if (!peerId) return
+  await sendEnvelope({
+    msgId: nextMsgId('callrej'),
+    from: nodeId.value,
+    to: peerId,
+    ttl: 8,
+    type: 'CALL_REJECT',
+    payload: { reason: 'rejected', ts: Date.now() },
+    sig: ''
+  })
+  callState.value = 'idle'
+  currentCallPeerId.value = ''
+}
+
+async function endVideoCall(notifyPeer = true) {
+  const peerId = currentCallPeerId.value
+  if (notifyPeer && peerId) {
+    try {
+      await sendEnvelope({
+        msgId: nextMsgId('callend'),
+        from: nodeId.value,
+        to: peerId,
+        ttl: 8,
+        type: 'CALL_END',
+        payload: { ts: Date.now() },
+        sig: ''
+      })
+    } catch {
+      // ignore
+    }
+  }
+  closePeerConnection()
+  stopLocalMedia()
+  incomingCallFrom.value = ''
+  currentCallPeerId.value = ''
+  callState.value = 'idle'
 }
 
 async function broadcastOwnKeyBundle(targetPeerId = '*') {
@@ -551,6 +785,101 @@ function onMeshEnvelope(envelope) {
     return
   }
 
+  if (envelope.type === 'CALL_REQUEST') {
+    if (callState.value !== 'idle' && currentCallPeerId.value && currentCallPeerId.value !== envelope.from) {
+      sendEnvelope({
+        msgId: nextMsgId('callbusy'),
+        from: nodeId.value,
+        to: envelope.from,
+        ttl: 8,
+        type: 'CALL_REJECT',
+        payload: { reason: 'busy', ts: Date.now() },
+        sig: ''
+      }).catch(() => {})
+      return
+    }
+    incomingCallFrom.value = envelope.from
+    currentCallPeerId.value = envelope.from
+    callState.value = 'ringing'
+    return
+  }
+
+  if (envelope.type === 'CALL_ACCEPT') {
+    if (envelope.from !== currentCallPeerId.value) return
+    ensurePeerConnection(envelope.from)
+      .then(() => {
+        callState.value = 'connecting'
+      })
+      .catch((e) => {
+        callState.value = 'error'
+        callError.value = e?.message || 'Call accept handling failed.'
+      })
+    return
+  }
+
+  if (envelope.type === 'CALL_REJECT') {
+    if (envelope.from !== currentCallPeerId.value) return
+    callError.value = payload?.reason === 'busy' ? 'Собеседник занят.' : 'Собеседник отклонил звонок.'
+    endVideoCall(false).catch(() => {})
+    return
+  }
+
+  if (envelope.type === 'CALL_END') {
+    if (envelope.from !== currentCallPeerId.value) return
+    endVideoCall(false).catch(() => {})
+    return
+  }
+
+  if (envelope.type === 'SIGNAL_OFFER') {
+    const offer = payload?.sdp
+    if (!offer) return
+    ensurePeerConnection(envelope.from)
+      .then(async () => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+        await flushPendingRemoteIce()
+        const answer = await peerConnection.createAnswer()
+        await peerConnection.setLocalDescription(answer)
+        await sendEnvelope({
+          msgId: nextMsgId('answer'),
+          from: nodeId.value,
+          to: envelope.from,
+          ttl: 8,
+          type: 'SIGNAL_ANSWER',
+          payload: { sdp: answer },
+          sig: ''
+        })
+        if (callState.value !== 'in-call') callState.value = 'connecting'
+      })
+      .catch((e) => {
+        callState.value = 'error'
+        callError.value = e?.message || 'Offer handling failed.'
+      })
+    return
+  }
+
+  if (envelope.type === 'SIGNAL_ANSWER') {
+    const answer = payload?.sdp
+    if (!answer || !peerConnection) return
+    peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+      .then(() => flushPendingRemoteIce())
+      .catch((e) => {
+        callState.value = 'error'
+        callError.value = e?.message || 'Answer handling failed.'
+      })
+    return
+  }
+
+  if (envelope.type === 'SIGNAL_ICE') {
+    const candidate = payload?.candidate
+    if (!candidate) return
+    if (!peerConnection || !peerConnection.remoteDescription) {
+      pendingRemoteIce.push(candidate)
+      return
+    }
+    peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {})
+    return
+  }
+
   if (envelope.type === 'CHAT') {
     const threadKey = `peer:${envelope.from}`
     const peer = peers.value.find((p) => p.nodeId === envelope.from)
@@ -642,6 +971,10 @@ export function useMeshApp() {
     localName,
     nodeId,
     bridgeUrl,
+    stunUrl,
+    turnUrl,
+    turnUsername,
+    turnCredential,
     transportMode,
     meshState,
     meshError,
@@ -654,6 +987,16 @@ export function useMeshApp() {
     getHandshakeStatusByPeer,
     getHandshakeErrorByPeer,
     ensureE2eeForPeer,
+    callState,
+    callError,
+    currentCallPeerId,
+    incomingCallFrom,
+    localCallStream,
+    remoteCallStream,
+    startVideoCall,
+    acceptIncomingCall,
+    rejectIncomingCall,
+    endVideoCall,
     startMesh,
     stopMesh,
     openOrCreatePeerChat,

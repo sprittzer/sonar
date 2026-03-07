@@ -7,7 +7,8 @@ const HELLO_INTERVAL_MS = 1500
 const PEER_TTL_MS = 10000
 
 const TRANSPORT_LAN = 'lan'
-const TRANSPORT_BLE = 'ble'
+const TRANSPORT_BLE = 'ble' // legacy alias
+const TRANSPORT_BLUETOOTH = 'bluetooth'
 const TRANSPORT_HYBRID = 'hybrid'
 const BLE_SERVICE_UUID_NODASH = '1234567812345678123456789abc0001'
 
@@ -50,7 +51,7 @@ function isLanEnabled() {
 }
 
 function isBleEnabled() {
-  return transportMode === TRANSPORT_BLE || transportMode === TRANSPORT_HYBRID
+  return transportMode === TRANSPORT_BLUETOOTH || transportMode === TRANSPORT_BLE || transportMode === TRANSPORT_HYBRID
 }
 
 function peersArray() {
@@ -356,7 +357,9 @@ async function startMesh(params = {}) {
 
   if (params.nodeId) nodeId = params.nodeId
   if (params.displayName) displayName = params.displayName
-  if (params.transport) transportMode = params.transport
+  if (params.transport) {
+    transportMode = params.transport === TRANSPORT_BLE ? TRANSPORT_BLUETOOTH : params.transport
+  }
   if (Array.isArray(params.capabilities) && params.capabilities.length) {
     capabilities = params.capabilities
   }
