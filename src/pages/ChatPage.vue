@@ -2,13 +2,22 @@
   <section class="route-panel">
     <div class="chat-header">
       <h2>{{ label }}</h2>
-      <p class="small">{{ chatType === 'group' ? 'Групповой чат' : 'Личный чат' }}</p>
+      <p class="small">
+        {{ chatType === 'group' ? 'Групповой чат' : 'Личный чат' }}
+        <span v-if="chatType === 'peer'" class="omemo-badge" :class="isEncrypted ? 'encrypted' : 'plain'">
+          {{ isEncrypted ? '🔒 Зашифрован' : '🔓 Нет шифрования' }}
+        </span>
+      </p>
     </div>
 
     <div class="messages">
       <div v-for="item in messages" :key="item.localKey" :class="['bubble', item.outgoing ? 'out' : 'in']">
-        <div class="meta">{{ item.outgoing ? 'Ты' : item.from }} • {{ formatTime(item.ts) }}</div>
-        <div>{{ item.text }}</div>
+        <div class="meta">
+          {{ item.outgoing ? 'Ты' : item.from }} • {{ formatTime(item.ts) }}
+          <span v-if="item.encrypted" class="lock-icon" title="OMEMO">🔒</span>
+        </div>
+        <div v-if="item.decryptFailed" class="decrypt-error">🔒 Зашифровано — ключ недоступен</div>
+        <div v-else>{{ item.text }}</div>
       </div>
       <div v-if="messages.length === 0" class="placeholder">Начни переписку.</div>
     </div>
@@ -44,6 +53,7 @@ const {
   formatTime,
   peers,
   groups,
+  omemoSessions,
   openOrCreatePeerChat,
   openOrCreateGroupChat
 } = useMeshApp()
@@ -51,6 +61,9 @@ const {
 const threadKey = computed(() => `${props.chatType}:${props.chatId}`)
 const label = computed(() => getThreadLabel(threadKey.value))
 const messages = computed(() => getMessages(threadKey.value))
+const isEncrypted = computed(() =>
+  props.chatType === 'peer' && omemoSessions.value.has(props.chatId)
+)
 
 watch(
   () => [props.chatType, props.chatId],
