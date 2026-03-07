@@ -70,6 +70,7 @@ watch(groups, () => saveJson(GROUPS_KEY, groups.value), { deep: true })
 
 const chatsByThread = ref({})
 const threadMeta = ref({})
+const gossipHandlersByTopic = new Map() // topic -> Set<fn>
 
 let mesh = null
 const seen = new Set()
@@ -206,6 +207,53 @@ function getThreadLabel(threadKey) {
 
 function getMessages(threadKey) {
   return chatsByThread.value[threadKey] || []
+}
+
+function subscribeTopic(topic, handler) {
+  const t = String(topic || '').trim()
+  if (!t || typeof handler !== 'function') {
+    throw new Error('subscribeTopic requires topic and handler')
+  }
+  const current = gossipHandlersByTopic.get(t) || new Set()
+  current.add(handler)
+  gossipHandlersByTopic.set(t, current)
+  return () => {
+    const set = gossipHandlersByTopic.get(t)
+    if (!set) return
+    set.delete(handler)
+    if (set.size === 0) gossipHandlersByTopic.delete(t)
+  }
+}
+
+function dispatchTopic(topic, message) {
+  const set = gossipHandlersByTopic.get(topic)
+  if (!set || set.size === 0) return
+  for (const fn of set) {
+    try {
+      fn(message)
+    } catch {
+      // ignore faulty subscriber
+    }
+  }
+}
+
+async function publishTopic(topic, data, to = '*', ttl = 8) {
+  const t = String(topic || '').trim()
+  if (!t) throw new Error('publishTopic requires topic')
+  await sendEnvelope({
+    msgId: nextMsgId('gpub'),
+    from: nodeId.value,
+    to: to || '*',
+    ttl,
+    type: 'GOSSIP_PUBSUB',
+    payload: {
+      topic: t,
+      data,
+      ts: Date.now(),
+      fromName: localName.value || nodeId.value
+    },
+    sig: ''
+  })
 }
 
 function getPeerIdFromThread(threadKey) {
@@ -515,18 +563,6 @@ async function acceptIncomingCall() {
       payload: { ts: Date.now() },
       sig: ''
     })
-
-    const offer = await peerConnection.createOffer()
-    await peerConnection.setLocalDescription(offer)
-    await sendEnvelope({
-      msgId: nextMsgId('offer'),
-      from: nodeId.value,
-      to: peerId,
-      ttl: 8,
-      type: 'SIGNAL_OFFER',
-      payload: { sdp: offer },
-      sig: ''
-    })
   } catch (e) {
     callState.value = 'error'
     callError.value = e?.message || 'Не удалось принять звонок.'
@@ -807,7 +843,18 @@ function onMeshEnvelope(envelope) {
   if (envelope.type === 'CALL_ACCEPT') {
     if (envelope.from !== currentCallPeerId.value) return
     ensurePeerConnection(envelope.from)
-      .then(() => {
+      .then(async () => {
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+        await sendEnvelope({
+          msgId: nextMsgId('offer'),
+          from: nodeId.value,
+          to: envelope.from,
+          ttl: 8,
+          type: 'SIGNAL_OFFER',
+          payload: { sdp: offer },
+          sig: ''
+        })
         callState.value = 'connecting'
       })
       .catch((e) => {
@@ -880,6 +927,18 @@ function onMeshEnvelope(envelope) {
     return
   }
 
+  if (envelope.type === 'GOSSIP_PUBSUB') {
+    const topic = String(payload?.topic || '').trim()
+    if (!topic) return
+    dispatchTopic(topic, {
+      from: envelope.from,
+      ts: payload?.ts || Date.now(),
+      fromName: payload?.fromName || envelope.from,
+      data: payload?.data
+    })
+    return
+  }
+
   if (envelope.type === 'CHAT') {
     const threadKey = `peer:${envelope.from}`
     const peer = peers.value.find((p) => p.nodeId === envelope.from)
@@ -943,6 +1002,10 @@ function onMeshEnvelope(envelope) {
   }
 
   if (envelope.type === 'CHAT_GROUP') {
+    // We already append own group messages as outgoing before sending.
+    // Ignore looped-back copies from mesh to avoid duplicates.
+    if (envelope.from === nodeId.value) return
+
     const memberIds = Array.isArray(payload.memberIds) ? payload.memberIds : []
     if (!memberIds.includes(nodeId.value)) return
 
@@ -1004,6 +1067,8 @@ export function useMeshApp() {
     createGroup,
     getThreadLabel,
     getMessages,
+    subscribeTopic,
+    publishTopic,
     markThreadRead,
     sendChatToThread,
     getGroupById,

@@ -82,6 +82,9 @@ public class MeshPlugin extends Plugin {
     private static final String TRANSPORT_BLUETOOTH = "bluetooth";
     private static final String TRANSPORT_HYBRID = "hybrid";
     private static final ParcelUuid BLE_SERVICE_UUID = ParcelUuid.fromString("12345678-1234-5678-1234-56789abc0001");
+    private static final long HELLO_INTERVAL_MS = 2500;
+    private static final int HELLO_BROADCAST_EVERY_TICKS = 4;
+    private static final long PEER_TTL_MS = 20000;
 
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
     private final Set<String> seenMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -107,6 +110,7 @@ public class MeshPlugin extends Plugin {
     private BluetoothLeScanner bleScanner;
     private AdvertiseCallback bleAdvertiseCallback;
     private ScanCallback bleScanCallback;
+    private int helloTick = 0;
 
     @PluginMethod
     public void start(PluginCall call) {
@@ -219,8 +223,8 @@ public class MeshPlugin extends Plugin {
 
     private void startSchedulers() {
         scheduler = Executors.newScheduledThreadPool(2);
-        scheduler.scheduleAtFixedRate(this::broadcastHello, 200, 1500, TimeUnit.MILLISECONDS);
-        scheduler.scheduleAtFixedRate(this::prunePeers, 3, 3, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::helloTick, 200, HELLO_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        scheduler.scheduleAtFixedRate(this::prunePeers, 3, 5, TimeUnit.SECONDS);
     }
 
     private boolean isLanEnabled() {
@@ -508,9 +512,19 @@ public class MeshPlugin extends Plugin {
             }
         }
 
+        Peer prev = peers.get(remoteNodeId);
         Peer peer = new Peer(remoteNodeId, remoteDisplayName, sourceAddress.getHostAddress(), remotePort, caps);
         peers.put(remoteNodeId, peer);
-        emitPeersUpdate();
+
+        boolean changed =
+            prev == null ||
+            !safeEquals(prev.displayName, peer.displayName) ||
+            !safeEquals(prev.address, peer.address) ||
+            prev.port != peer.port ||
+            !safeEquals(String.valueOf(prev.capabilities), String.valueOf(peer.capabilities));
+        if (changed) {
+            emitPeersUpdate();
+        }
 
         if (shouldAck) {
             sendHelloAckTo(sourceAddress, remotePort);
@@ -591,19 +605,37 @@ public class MeshPlugin extends Plugin {
         }
     }
 
-    private void broadcastHello() {
+    private void helloTick() {
         if (!running) return;
+        helloTick++;
+        sendHelloToKnownPeers();
+        if (helloTick % HELLO_BROADCAST_EVERY_TICKS == 0 || peers.isEmpty()) {
+            sendHelloBroadcast();
+        }
+    }
 
+    private void sendHelloBroadcast() {
+        if (!running) return;
         try {
             JSONObject hello = buildHello("HELLO");
             byte[] data = hello.toString().getBytes(StandardCharsets.UTF_8);
             sendDatagram(data, "255.255.255.255", udpPort);
+        } catch (Exception e) {
+            Log.w(TAG, "sendHelloBroadcast failed", e);
+        }
+    }
 
+    private void sendHelloToKnownPeers() {
+        if (!running) return;
+        try {
+            JSONObject hello = buildHello("HELLO");
+            byte[] data = hello.toString().getBytes(StandardCharsets.UTF_8);
             for (Peer peer : peers.values()) {
+                if (peer.port <= 0 || peer.address.startsWith("ble:")) continue;
                 sendDatagram(data, peer.address, peer.port);
             }
         } catch (Exception e) {
-            Log.w(TAG, "broadcastHello failed", e);
+            Log.w(TAG, "sendHelloToKnownPeers failed", e);
         }
     }
 
@@ -653,7 +685,7 @@ public class MeshPlugin extends Plugin {
         for (String id : ids) {
             Peer p = peers.get(id);
             if (p == null) continue;
-            if (now - p.lastSeenMs > 10000) {
+            if (now - p.lastSeenMs > PEER_TTL_MS) {
                 peers.remove(id);
                 changed = true;
             }
@@ -702,6 +734,7 @@ public class MeshPlugin extends Plugin {
             scheduler.shutdownNow();
             scheduler = null;
         }
+        helloTick = 0;
 
         if (socket != null) {
             try {
@@ -727,6 +760,12 @@ public class MeshPlugin extends Plugin {
         JSObject event = new JSObject();
         event.put("message", message);
         notifyListeners("error", event);
+    }
+
+    private boolean safeEquals(String a, String b) {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        return a.equals(b);
     }
 
     @Override

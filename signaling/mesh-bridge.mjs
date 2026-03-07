@@ -3,8 +3,9 @@ import { WebSocketServer } from 'ws'
 
 const WS_PORT = Number(process.env.BRIDGE_PORT || 8788)
 const UDP_PORT = Number(process.env.MESH_UDP_PORT || 41234)
-const HELLO_INTERVAL_MS = 1500
-const PEER_TTL_MS = 10000
+const HELLO_INTERVAL_MS = 2500
+const HELLO_BROADCAST_EVERY_TICKS = 4 // ~10s with 2.5s interval
+const PEER_TTL_MS = 20000
 
 const TRANSPORT_LAN = 'lan'
 const TRANSPORT_BLE = 'ble' // legacy alias
@@ -33,6 +34,7 @@ let noble = null
 let bleActive = false
 let nobleStateHandler = null
 let nobleDiscoverHandler = null
+let helloTick = 0
 
 function emit(event, payload = {}) {
   const data = JSON.stringify({ event, payload })
@@ -71,11 +73,21 @@ function emitPeers() {
 
 function upsertPeer(peer) {
   if (!peer.nodeId || peer.nodeId === nodeId) return
-  peers.set(peer.nodeId, {
+  const prev = peers.get(peer.nodeId)
+  const next = {
     ...peer,
     lastSeenMs: Date.now()
-  })
-  emitPeers()
+  }
+  peers.set(peer.nodeId, next)
+
+  const changed =
+    !prev ||
+    prev.displayName !== next.displayName ||
+    prev.address !== next.address ||
+    prev.port !== next.port ||
+    JSON.stringify(prev.capabilities || []) !== JSON.stringify(next.capabilities || [])
+
+  if (changed) emitPeers()
 }
 
 function sendUdp(obj, address, port) {
@@ -102,11 +114,25 @@ function sendHelloAckTo(address, port) {
   sendUdp(buildHello('HELLO_ACK'), address, port)
 }
 
-function broadcastHello() {
+function sendHelloToKnownPeers() {
+  if (!isLanEnabled()) return
+  for (const peer of peers.values()) {
+    if (peer.port <= 0 || String(peer.address || '').startsWith('ble:')) continue
+    sendUdp(buildHello('HELLO'), peer.address, peer.port)
+  }
+}
+
+function broadcastHelloSubnet() {
   if (!isLanEnabled()) return
   sendUdp(buildHello('HELLO'), '255.255.255.255', UDP_PORT)
-  for (const peer of peers.values()) {
-    sendUdp(buildHello('HELLO'), peer.address, peer.port)
+}
+
+function helloTickFn() {
+  if (!isLanEnabled()) return
+  helloTick += 1
+  sendHelloToKnownPeers()
+  if (helloTick % HELLO_BROADCAST_EVERY_TICKS === 0 || peers.size === 0) {
+    broadcastHelloSubnet()
   }
 }
 
@@ -368,7 +394,8 @@ async function startMesh(params = {}) {
     socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
     socket.bind(UDP_PORT, () => {
       socket.setBroadcast(true)
-      broadcastHello()
+      helloTick = 0
+      helloTickFn()
     })
 
     socket.on('message', onUdpMessage)
@@ -376,7 +403,7 @@ async function startMesh(params = {}) {
       emit('error', { message: `UDP error: ${error.message}` })
     })
 
-    helloTimer = setInterval(broadcastHello, HELLO_INTERVAL_MS)
+    helloTimer = setInterval(helloTickFn, HELLO_INTERVAL_MS)
     startMdns().catch((error) => {
       warn(`mDNS helper init failed: ${error.message}`)
     })
@@ -400,6 +427,7 @@ async function stopMesh() {
   clearInterval(pruneTimer)
   helloTimer = null
   pruneTimer = null
+  helloTick = 0
 
   stopMdns()
   await stopBle()

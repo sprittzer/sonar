@@ -188,11 +188,19 @@ async function send() {
 }
 
 watch([localCallStream, localVideoRef], ([stream, el]) => {
-  if (el) el.srcObject = stream || null
+  if (!el) return
+  el.srcObject = stream || null
+  if (stream) {
+    el.play().catch(() => {})
+  }
 }, { immediate: true })
 
 watch([remoteCallStream, remoteVideoRef], ([stream, el]) => {
-  if (el) el.srcObject = stream || null
+  if (!el) return
+  el.srcObject = stream || null
+  if (stream) {
+    el.play().catch(() => {})
+  }
 }, { immediate: true })
 
 async function startCall() {
