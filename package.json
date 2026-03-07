@@ -17,7 +17,9 @@
     "bridge:ble": "node signaling/ble-bridge.mjs",
     "electron:dev": "concurrently -k \"vite --host 127.0.0.1 --port 6001\" \"wait-on tcp:6001 && VITE_DEV_SERVER_URL=http://127.0.0.1:6001 electron .\"",
     "electron:dist:win": "npm run build && electron-builder --config electron-builder.yml --win nsis --x64",
-    "electron:dist:linux": "npm run build && electron-builder --config electron-builder.yml --linux AppImage --x64"
+    "electron:dist:linux": "npm run build && electron-builder --config electron-builder.yml --linux AppImage --x64",
+    "test": "node --experimental-specifier-resolution=node --test test/*.test.js",
+    "test:watch": "node --experimental-specifier-resolution=node --test --watch test/*.test.js"
   },
   "dependencies": {
     "@abandonware/bleno": "^0.6.2",
