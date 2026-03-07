@@ -1,0 +1,28 @@
+appId: com.tania.hexmesh.desktop
+productName: Hex Mesh Messenger
+asar: true
+asarUnpack:
+  - signaling/**
+directories:
+  output: release
+files:
+  - dist/**/*
+  - electron/**/*
+  - signaling/mesh-bridge.mjs
+  - package.json
+  - node_modules/ws/**/*
+  - node_modules/bonjour-service/**/*
+extraMetadata:
+  main: electron/main.cjs
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+npmRebuild: false
+buildDependenciesFromSource: false

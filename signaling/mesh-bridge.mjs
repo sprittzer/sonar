@@ -6,6 +6,11 @@ const UDP_PORT = Number(process.env.MESH_UDP_PORT || 41234)
 const HELLO_INTERVAL_MS = 1500
 const PEER_TTL_MS = 10000
 
+const TRANSPORT_LAN = 'lan'
+const TRANSPORT_BLE = 'ble'
+const TRANSPORT_HYBRID = 'hybrid'
+const BLE_SERVICE_UUID_NODASH = '1234567812345678123456789abc0001'
+
 const peers = new Map()
 const seen = new Set()
 const clients = new Set()
@@ -13,6 +18,8 @@ const clients = new Set()
 let nodeId = `n-${Math.random().toString(16).slice(2, 10)}`
 let displayName = 'User'
 let capabilities = ['chat', 'signal', 'av']
+let transportMode = TRANSPORT_HYBRID
+
 let running = false
 let socket = null
 let helloTimer = null
@@ -20,6 +27,11 @@ let pruneTimer = null
 let bonjour = null
 let browser = null
 let service = null
+
+let noble = null
+let bleActive = false
+let nobleStateHandler = null
+let nobleDiscoverHandler = null
 
 function emit(event, payload = {}) {
   const data = JSON.stringify({ event, payload })
@@ -31,6 +43,14 @@ function emit(event, payload = {}) {
 function warn(message) {
   emit('error', { message })
   console.warn(message)
+}
+
+function isLanEnabled() {
+  return transportMode === TRANSPORT_LAN || transportMode === TRANSPORT_HYBRID
+}
+
+function isBleEnabled() {
+  return transportMode === TRANSPORT_BLE || transportMode === TRANSPORT_HYBRID
 }
 
 function peersArray() {
@@ -58,7 +78,7 @@ function upsertPeer(peer) {
 }
 
 function sendUdp(obj, address, port) {
-  if (!socket) return
+  if (!socket || !isLanEnabled()) return
   const data = Buffer.from(JSON.stringify(obj), 'utf8')
   socket.send(data, port, address)
 }
@@ -82,6 +102,7 @@ function sendHelloAckTo(address, port) {
 }
 
 function broadcastHello() {
+  if (!isLanEnabled()) return
   sendUdp(buildHello('HELLO'), '255.255.255.255', UDP_PORT)
   for (const peer of peers.values()) {
     sendUdp(buildHello('HELLO'), peer.address, peer.port)
@@ -113,15 +134,19 @@ function normalizeEnvelope(envelope) {
 }
 
 function forwardEnvelope(envelope, excludeKey = '') {
+  if (!isLanEnabled()) return
   const wrapper = { kind: 'MESH', envelope }
 
   if (envelope.to !== '*' && peers.has(envelope.to)) {
     const target = peers.get(envelope.to)
-    sendUdp(wrapper, target.address, target.port)
+    if (target && target.port > 0 && !String(target.address || '').startsWith('ble:')) {
+      sendUdp(wrapper, target.address, target.port)
+    }
     return
   }
 
   for (const peer of peers.values()) {
+    if (peer.port <= 0 || String(peer.address || '').startsWith('ble:')) continue
     const key = `${peer.address}:${peer.port}`
     if (excludeKey && key === excludeKey) continue
     sendUdp(wrapper, peer.address, peer.port)
@@ -179,6 +204,8 @@ function onUdpMessage(raw, rinfo) {
 }
 
 async function startMdns() {
+  if (!isLanEnabled()) return
+
   let BonjourCtor
   try {
     const mod = await import('bonjour-service')
@@ -238,37 +265,131 @@ function stopMdns() {
   bonjour = null
 }
 
-function startMesh(params = {}) {
+function normalizeUuid(uuid = '') {
+  return String(uuid).toLowerCase().replace(/-/g, '')
+}
+
+function onBleDiscover(peripheral) {
+  const serviceData = peripheral?.advertisement?.serviceData || []
+  const entry = serviceData.find((item) => normalizeUuid(item?.uuid) === BLE_SERVICE_UUID_NODASH)
+  if (!entry?.data) return
+
+  const raw = entry.data.toString('utf8')
+  const [remoteNodeId, remoteName] = raw.split('|', 2)
+  if (!remoteNodeId || remoteNodeId === nodeId) return
+
+  upsertPeer({
+    nodeId: remoteNodeId,
+    displayName: remoteName || remoteNodeId,
+    address: `ble:${peripheral?.address || peripheral?.id || 'unknown'}`,
+    port: -1,
+    capabilities: ['ble']
+  })
+}
+
+async function startBle() {
+  if (!isBleEnabled() || bleActive) return
+
+  let mod
+  try {
+    mod = await import('@abandonware/noble')
+  } catch {
+    warn('BLE disabled in helper: package @abandonware/noble is not installed.')
+    return
+  }
+
+  noble = mod.default || mod
+  if (!noble) return
+  bleActive = true
+
+  nobleDiscoverHandler = (peripheral) => {
+    try {
+      onBleDiscover(peripheral)
+    } catch {}
+  }
+
+  nobleStateHandler = async (state) => {
+    if (state !== 'poweredOn') return
+    try {
+      if (typeof noble.startScanningAsync === 'function') {
+        await noble.startScanningAsync([BLE_SERVICE_UUID_NODASH], true)
+      } else {
+        noble.startScanning([BLE_SERVICE_UUID_NODASH], true)
+      }
+    } catch (error) {
+      warn(`BLE scan start failed: ${error.message}`)
+    }
+  }
+
+  noble.on('discover', nobleDiscoverHandler)
+  noble.on('stateChange', nobleStateHandler)
+
+  if (noble.state === 'poweredOn') {
+    await nobleStateHandler('poweredOn')
+  }
+}
+
+async function stopBle() {
+  if (!noble) {
+    bleActive = false
+    return
+  }
+
+  try {
+    if (typeof noble.stopScanningAsync === 'function') {
+      await noble.stopScanningAsync()
+    } else {
+      noble.stopScanning()
+    }
+  } catch {}
+
+  if (nobleDiscoverHandler) noble.removeListener('discover', nobleDiscoverHandler)
+  if (nobleStateHandler) noble.removeListener('stateChange', nobleStateHandler)
+  nobleDiscoverHandler = null
+  nobleStateHandler = null
+  noble = null
+  bleActive = false
+}
+
+async function startMesh(params = {}) {
   if (running) return
 
   if (params.nodeId) nodeId = params.nodeId
   if (params.displayName) displayName = params.displayName
+  if (params.transport) transportMode = params.transport
   if (Array.isArray(params.capabilities) && params.capabilities.length) {
     capabilities = params.capabilities
   }
 
-  socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
-  socket.bind(UDP_PORT, () => {
-    socket.setBroadcast(true)
-    running = true
-    emit('state', { state: 'running', nodeId, udpPort: UDP_PORT })
-    broadcastHello()
-  })
+  if (isLanEnabled()) {
+    socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+    socket.bind(UDP_PORT, () => {
+      socket.setBroadcast(true)
+      broadcastHello()
+    })
 
-  socket.on('message', onUdpMessage)
-  socket.on('error', (error) => {
-    emit('error', { message: `UDP error: ${error.message}` })
-  })
+    socket.on('message', onUdpMessage)
+    socket.on('error', (error) => {
+      emit('error', { message: `UDP error: ${error.message}` })
+    })
 
-  helloTimer = setInterval(broadcastHello, HELLO_INTERVAL_MS)
+    helloTimer = setInterval(broadcastHello, HELLO_INTERVAL_MS)
+    startMdns().catch((error) => {
+      warn(`mDNS helper init failed: ${error.message}`)
+    })
+  }
+
   pruneTimer = setInterval(prunePeers, 3000)
 
-  startMdns().catch((error) => {
-    warn(`mDNS helper init failed: ${error.message}`)
-  })
+  if (isBleEnabled()) {
+    await startBle()
+  }
+
+  running = true
+  emit('state', { state: 'running', nodeId, udpPort: UDP_PORT, transport: transportMode })
 }
 
-function stopMesh() {
+async function stopMesh() {
   if (!running && !socket) return
 
   running = false
@@ -278,6 +399,7 @@ function stopMesh() {
   pruneTimer = null
 
   stopMdns()
+  await stopBle()
 
   try {
     socket?.close()
@@ -294,7 +416,7 @@ const wss = new WebSocketServer({ port: WS_PORT })
 
 wss.on('connection', (ws) => {
   clients.add(ws)
-  ws.send(JSON.stringify({ event: 'state', payload: { state: running ? 'running' : 'stopped', nodeId, udpPort: UDP_PORT } }))
+  ws.send(JSON.stringify({ event: 'state', payload: { state: running ? 'running' : 'stopped', nodeId, udpPort: UDP_PORT, transport: transportMode } }))
   ws.send(JSON.stringify({ event: 'peersUpdate', payload: { peers: peersArray() } }))
 
   ws.on('message', (raw) => {
@@ -306,20 +428,24 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.action === 'start') {
-      try {
-        startMesh(msg.payload || {})
-      } catch (error) {
+      Promise.resolve(startMesh(msg.payload || {})).catch((error) => {
         emit('error', { message: `Start failed: ${error.message}` })
-      }
+      })
       return
     }
 
     if (msg.action === 'stop') {
-      stopMesh()
+      Promise.resolve(stopMesh()).catch((error) => {
+        emit('error', { message: `Stop failed: ${error.message}` })
+      })
       return
     }
 
     if (msg.action === 'sendPacket' && msg.payload?.envelope) {
+      if (!isLanEnabled()) {
+        emit('error', { message: 'Bridge in BLE-only mode: packet routing requires LAN/hybrid transport.' })
+        return
+      }
       const envelope = normalizeEnvelope(msg.payload.envelope)
       onMeshEnvelope(envelope)
       return
@@ -335,5 +461,12 @@ wss.on('connection', (ws) => {
   })
 })
 
+process.on('SIGINT', () => {
+  Promise.resolve(stopMesh()).finally(() => process.exit(0))
+})
+process.on('SIGTERM', () => {
+  Promise.resolve(stopMesh()).finally(() => process.exit(0))
+})
+
 console.log(`Mesh bridge listening on ws://0.0.0.0:${WS_PORT}`)
-console.log('This helper uses mDNS + UDP + gossip, same topology as Android APK.')
+console.log('This helper uses mDNS + UDP + gossip. BLE scan is optional via @abandonware/noble.')

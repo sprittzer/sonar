@@ -2,6 +2,7 @@
   "name": "vue-calculator-capacitor",
   "version": "1.0.0",
   "private": true,
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,9 +13,15 @@
     "cap:open-android": "npx cap open android",
     "android:apk": "npm run build && npx cap sync android && cd android && ./gradlew assembleDebug",
     "signal:lan": "node signaling/lan-server.mjs",
-    "bridge:mesh": "node signaling/mesh-bridge.mjs"
+    "bridge:mesh": "node signaling/mesh-bridge.mjs",
+    "bridge:ble": "node signaling/ble-bridge.mjs",
+    "electron:dev": "concurrently -k \"vite --host 127.0.0.1 --port 6001\" \"wait-on tcp:6001 && VITE_DEV_SERVER_URL=http://127.0.0.1:6001 electron .\"",
+    "electron:dist:win": "npm run build && electron-builder --config electron-builder.yml --win nsis --x64",
+    "electron:dist:linux": "npm run build && electron-builder --config electron-builder.yml --linux AppImage --x64"
   },
   "dependencies": {
+    "@abandonware/bleno": "^0.6.2",
+    "@abandonware/noble": "^1.9.2-26",
     "@capacitor/android": "^7.0.0",
     "@capacitor/core": "^7.0.0",
     "bonjour-service": "^1.3.0",
@@ -24,6 +31,11 @@
   "devDependencies": {
     "@capacitor/cli": "^7.0.0",
     "@vitejs/plugin-vue": "^5.2.1",
-    "vite": "^6.2.0"
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.3"
   }
 }

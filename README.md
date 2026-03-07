@@ -27,6 +27,15 @@ npm install bonjour-service
 
 Без этого будет работать UDP discovery fallback (`HELLO/HELLO_ACK`).
 
+BLE helper (desktop Bluetooth discovery + data):
+
+```bash
+npm install @abandonware/noble @abandonware/bleno
+npm run bridge:ble
+```
+
+Для BLE helper в UI укажи bridge URL: `ws://127.0.0.1:8790`.
+
 2. Запусти web UI:
 
 ```bash
@@ -46,6 +55,22 @@ APK:
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## Electron Desktop (web + bridge in one app)
+
+```bash
+npm run electron:dev
+```
+
+Сборка инсталляторов:
+
+```bash
+npm run electron:dist:win
+npm run electron:dist:linux
+```
+
+В desktop-сборку включены только web-часть, Electron runtime и `mesh-bridge`.
+Android/Java chain в desktop пакет не включается.
 
 ## Протокол
 

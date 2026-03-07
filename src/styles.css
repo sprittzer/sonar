@@ -223,8 +223,8 @@ body {
   }
 }
 
-/* OMEMO encryption status badge */
-.omemo-badge {
+/* E2EE encryption status badge */
+.e2ee-badge {
   display: inline-block;
   margin-left: 8px;
   font-size: 0.78rem;
@@ -234,12 +234,12 @@ body {
   vertical-align: middle;
 }
 
-.omemo-badge.encrypted {
+.e2ee-badge.encrypted {
   background: #dcfce7;
   color: #166534;
 }
 
-.omemo-badge.plain {
+.e2ee-badge.plain {
   background: #fef9c3;
   color: #713f12;
 }

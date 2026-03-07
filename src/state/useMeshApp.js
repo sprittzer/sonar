@@ -2,14 +2,14 @@ import { Capacitor } from '@capacitor/core'
 import { computed, ref, watch } from 'vue'
 import { createMeshTransport } from '../meshTransport'
 import {
-  initOmemo,
+  initE2ee,
   getOwnPublicKeyB64,
   processKeyBundle,
   hasSession,
   onSessionEstablished,
   encryptMessage,
   decryptMessage
-} from '../omemo'
+} from '../e2ee'
 
 const PROFILE_KEY = 'hex_mesh_profile_v1'
 const GROUPS_KEY = 'hex_mesh_groups_v1'
@@ -28,10 +28,11 @@ function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value))
 }
 
-// Track which peers have confirmed OMEMO sessions (reactive so UI can respond)
-const omemoSessions = ref(new Set())
+// Track which peers have confirmed E2EE sessions (reactive so UI can respond)
+const e2eeSessions = ref(new Set())
 const encryptionByThread = ref(loadJson(ENCRYPTION_PREFS_KEY, {}))
-const omemoHandshakeByPeer = ref({}) // peerId -> idle|pending|ready|failed
+const e2eeHandshakeByPeer = ref({}) // peerId -> idle|pending|ready|failed
+const e2eeErrorByPeer = ref({}) // peerId -> last error text
 
 const isNative = Capacitor.isNativePlatform()
 const persisted = loadJson(PROFILE_KEY, null)
@@ -39,13 +40,15 @@ const persisted = loadJson(PROFILE_KEY, null)
 const localName = ref(persisted?.localName || 'User')
 const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2, 10)}`)
 const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
+const transportMode = ref(persisted?.transportMode || 'hybrid')
 
 watch(encryptionByThread, () => saveJson(ENCRYPTION_PREFS_KEY, encryptionByThread.value), { deep: true })
-watch([localName, nodeId, bridgeUrl], () => {
+watch([localName, nodeId, bridgeUrl, transportMode], () => {
   saveJson(PROFILE_KEY, {
     localName: localName.value,
     nodeId: nodeId.value,
-    bridgeUrl: bridgeUrl.value
+    bridgeUrl: bridgeUrl.value,
+    transportMode: transportMode.value
   })
 })
 
@@ -61,6 +64,18 @@ const threadMeta = ref({})
 
 let mesh = null
 const seen = new Set()
+const pendingEncryptedByPeer = new Map() // peerId -> [{ envelope, label, placeholderKey }]
+let e2eeSessionListenerBound = false
+let e2eeInitPromise = null
+
+async function ensureE2eeInitialized() {
+  if (e2eeInitPromise) return e2eeInitPromise
+  e2eeInitPromise = initE2ee({ nodeId: nodeId.value }).catch((error) => {
+    e2eeInitPromise = null
+    throw error
+  })
+  return e2eeInitPromise
+}
 
 const chatThreads = computed(() => {
   return Object.entries(threadMeta.value)
@@ -184,27 +199,40 @@ function getPeerIdFromThread(threadKey) {
 function getHandshakeStatusByPeer(peerId) {
   if (!peerId) return 'idle'
   if (hasSession(peerId)) return 'ready'
-  return omemoHandshakeByPeer.value[peerId] || 'idle'
+  return e2eeHandshakeByPeer.value[peerId] || 'idle'
+}
+
+function getHandshakeErrorByPeer(peerId) {
+  if (!peerId) return ''
+  return e2eeErrorByPeer.value[peerId] || ''
 }
 
 function getThreadEncryptionEnabled(threadKey) {
   return Boolean(encryptionByThread.value[threadKey])
 }
 
-async function ensureOmemoForPeer(peerId) {
+async function ensureE2eeForPeer(peerId) {
   if (!peerId) return false
   if (hasSession(peerId)) {
-    omemoHandshakeByPeer.value[peerId] = 'ready'
-    omemoSessions.value = new Set([...omemoSessions.value, peerId])
+    e2eeHandshakeByPeer.value[peerId] = 'ready'
+    e2eeErrorByPeer.value[peerId] = ''
+    e2eeSessions.value = new Set([...e2eeSessions.value, peerId])
     return true
   }
 
-  omemoHandshakeByPeer.value[peerId] = 'pending'
+  e2eeHandshakeByPeer.value[peerId] = 'pending'
+  e2eeErrorByPeer.value[peerId] = ''
   try {
-    await broadcastOwnKeyBundle()
+    await ensureE2eeInitialized()
+    if (!mesh || meshState.value !== 'running') {
+      throw new Error('Mesh не запущен. Сначала нажмите "Старт mesh".')
+    }
+    await broadcastOwnKeyBundle(peerId)
+    await requestPeerKeyBundle(peerId)
     return false
-  } catch {
-    omemoHandshakeByPeer.value[peerId] = 'failed'
+  } catch (error) {
+    e2eeHandshakeByPeer.value[peerId] = 'failed'
+    e2eeErrorByPeer.value[peerId] = error?.message || 'Неизвестная ошибка обмена ключами.'
     return false
   }
 }
@@ -214,7 +242,7 @@ async function setThreadEncryption(threadKey, enabled) {
   if (enabled) {
     encryptionByThread.value = { ...encryptionByThread.value, [threadKey]: true }
     const peerId = getPeerIdFromThread(threadKey)
-    await ensureOmemoForPeer(peerId)
+    await ensureE2eeForPeer(peerId)
     return
   }
 
@@ -244,6 +272,7 @@ async function startMesh() {
       displayName: localName.value,
       capabilities: ['chat', 'signal', 'av', 'group'],
       bridgeUrl: bridgeUrl.value,
+      transportMode: transportMode.value,
       onPeers(nextPeers) {
         peers.value = nextPeers || []
 
@@ -267,19 +296,26 @@ async function startMesh() {
 
     await mesh.start()
 
-    // Initialise OMEMO and broadcast our public key bundle to all peers
+    // Initialise E2EE and broadcast our public key bundle to all peers
     try {
-      await initOmemo()
+      await ensureE2eeInitialized()
 
-      // Re-establish sessions when another tab shares a key bundle
-      onSessionEstablished((peerId) => {
-        omemoSessions.value = new Set([...omemoSessions.value, peerId])
-        omemoHandshakeByPeer.value[peerId] = 'ready'
-      })
+      // Re-establish sessions when another tab shares a key bundle.
+      if (!e2eeSessionListenerBound) {
+        onSessionEstablished((peerId) => {
+          e2eeSessions.value = new Set([...e2eeSessions.value, peerId])
+          e2eeHandshakeByPeer.value[peerId] = 'ready'
+          e2eeErrorByPeer.value[peerId] = ''
+          retryPendingEncrypted(peerId)
+        })
+        e2eeSessionListenerBound = true
+      }
 
-      await broadcastOwnKeyBundle()
+      if (mesh && meshState.value === 'running') {
+        await broadcastOwnKeyBundle()
+      }
     } catch (e) {
-      console.warn('OMEMO init failed:', e)
+      console.warn('E2EE init failed:', e)
     }
 
     return true
@@ -304,14 +340,14 @@ async function sendEnvelope(envelope) {
   await mesh.sendPacket(envelope)
 }
 
-async function broadcastOwnKeyBundle() {
+async function broadcastOwnKeyBundle(targetPeerId = '*') {
   const publicKey = await getOwnPublicKeyB64()
   const env = {
     msgId: nextMsgId('kb'),
     from: nodeId.value,
-    to: '*',
+    to: targetPeerId || '*',
     ttl: 8,
-    type: 'OMEMO_KEY_BUNDLE',
+    type: 'E2EE_KEY_BUNDLE',
     payload: {
       publicKey,
       deviceId: nodeId.value,
@@ -320,6 +356,69 @@ async function broadcastOwnKeyBundle() {
     sig: ''
   }
   await sendEnvelope(env)
+}
+
+async function requestPeerKeyBundle(peerId) {
+  const env = {
+    msgId: nextMsgId('kreq'),
+    from: nodeId.value,
+    to: peerId,
+    ttl: 8,
+    type: 'E2EE_KEY_REQUEST',
+    payload: {
+      requestedBy: nodeId.value,
+      ts: Date.now()
+    },
+    sig: ''
+  }
+  await sendEnvelope(env)
+}
+
+function queuePendingEncrypted(peerId, envelope, label, placeholderKey) {
+  if (!peerId || !envelope) return
+  const list = pendingEncryptedByPeer.get(peerId) || []
+  list.push({ envelope, label, placeholderKey })
+  pendingEncryptedByPeer.set(peerId, list)
+}
+
+function retryPendingEncrypted(peerId) {
+  if (!peerId || !hasSession(peerId)) return
+  const list = pendingEncryptedByPeer.get(peerId)
+  if (!list?.length) return
+
+  for (const { envelope, label, placeholderKey } of list) {
+    const payload = envelope?.payload || {}
+    const e2ee = payload.e2ee
+    if (!e2ee?.iv || !e2ee?.ciphertext) continue
+
+    decryptMessage(peerId, e2ee.iv, e2ee.ciphertext)
+      .then((plaintext) => {
+        const threadKey = `peer:${peerId}`
+        const messages = chatsByThread.value[threadKey] || []
+        const target = messages.find((m) => m.localKey === placeholderKey)
+        if (target) {
+          target.text = plaintext
+          target.decryptFailed = false
+          target.ts = payload.ts || target.ts || Date.now()
+          target.encrypted = true
+          return
+        }
+
+        pushMessage(threadKey, {
+          localKey: `${envelope.msgId}-in-retry`,
+          text: plaintext,
+          ts: payload.ts || Date.now(),
+          from: label || payload.fromName || peerId,
+          outgoing: false,
+          encrypted: true
+        })
+      })
+      .catch(() => {
+        // Keep original placeholder in chat if still not decryptable.
+      })
+  }
+
+  pendingEncryptedByPeer.delete(peerId)
 }
 
 async function sendChatToThread(threadKey, text) {
@@ -338,16 +437,16 @@ async function sendChatToThread(threadKey, text) {
 
     if (secureEnabled) {
       if (!hasSession(peerId)) {
-        await ensureOmemoForPeer(peerId)
+        await ensureE2eeForPeer(peerId)
         throw new Error('Шифрование включено, но защищенная сессия еще не готова. Подождите обмена ключами.')
       }
       try {
-        const omemo = await encryptMessage(peerId, normalized)
+        const e2ee = await encryptMessage(peerId, normalized)
         payload = {
           text: '',
           ts,
           fromName: localName.value || nodeId.value,
-          omemo
+          e2ee
         }
         encrypted = true
       } catch (e) {
@@ -421,24 +520,34 @@ function onMeshEnvelope(envelope) {
 
   const payload = envelope.payload || {}
 
-  if (envelope.type === 'OMEMO_KEY_BUNDLE') {
+  if (envelope.type === 'E2EE_KEY_BUNDLE') {
     const { publicKey, deviceId } = payload
     const peerId = deviceId || envelope.from
     if (peerId && publicKey) {
       processKeyBundle(peerId, publicKey)
         .then(() => {
           if (hasSession(peerId)) {
-            omemoSessions.value = new Set([...omemoSessions.value, peerId])
-            omemoHandshakeByPeer.value[peerId] = 'ready'
+            e2eeSessions.value = new Set([...e2eeSessions.value, peerId])
+            e2eeHandshakeByPeer.value[peerId] = 'ready'
             // Reply with our own key bundle so the peer can also establish a session
-            broadcastOwnKeyBundle().catch((e) => console.warn('OMEMO: failed to send own key bundle:', e))
+            broadcastOwnKeyBundle(peerId).catch((e) => console.warn('E2EE: failed to send own key bundle:', e))
+            retryPendingEncrypted(peerId)
           }
         })
         .catch((e) => {
-          omemoHandshakeByPeer.value[peerId] = 'failed'
-          console.warn('OMEMO: processKeyBundle failed:', e)
+          e2eeHandshakeByPeer.value[peerId] = 'failed'
+          e2eeErrorByPeer.value[peerId] = e?.message || 'Ошибка обработки key bundle.'
+          console.warn('E2EE: processKeyBundle failed:', e)
         })
     }
+    return
+  }
+
+  if (envelope.type === 'E2EE_KEY_REQUEST') {
+    if (envelope.to && envelope.to !== '*' && envelope.to !== nodeId.value) return
+    broadcastOwnKeyBundle(envelope.from).catch((e) => {
+      console.warn('E2EE: failed to reply with key bundle:', e)
+    })
     return
   }
 
@@ -448,10 +557,10 @@ function onMeshEnvelope(envelope) {
     const label = peer?.displayName || payload.fromName || envelope.from
     ensureThread(threadKey, label)
 
-    if (payload.omemo) {
-      // OMEMO-encrypted message
+    if (payload.e2ee) {
+      // E2EE-encrypted message
       if (hasSession(envelope.from)) {
-        decryptMessage(envelope.from, payload.omemo.iv, payload.omemo.ciphertext)
+        decryptMessage(envelope.from, payload.e2ee.iv, payload.e2ee.ciphertext)
           .then((plaintext) => {
             pushMessage(threadKey, {
               localKey: `${envelope.msgId}-in`,
@@ -463,8 +572,9 @@ function onMeshEnvelope(envelope) {
             })
           })
           .catch(() => {
+            const placeholderKey = `${envelope.msgId}-in-failed`
             pushMessage(threadKey, {
-              localKey: `${envelope.msgId}-in-failed`,
+              localKey: placeholderKey,
               text: '[Не удалось расшифровать сообщение]',
               ts: payload.ts || Date.now(),
               from: label,
@@ -472,10 +582,13 @@ function onMeshEnvelope(envelope) {
               encrypted: true,
               decryptFailed: true
             })
+            queuePendingEncrypted(envelope.from, envelope, label, placeholderKey)
+            ensureE2eeForPeer(envelope.from)
           })
       } else {
+        const placeholderKey = `${envelope.msgId}-in-nosession`
         pushMessage(threadKey, {
-          localKey: `${envelope.msgId}-in-nosession`,
+          localKey: placeholderKey,
           text: '[Зашифрованное сообщение: сессия еще не установлена]',
           ts: payload.ts || Date.now(),
           from: label,
@@ -483,7 +596,8 @@ function onMeshEnvelope(envelope) {
           encrypted: true,
           decryptFailed: true
         })
-        ensureOmemoForPeer(envelope.from)
+        queuePendingEncrypted(envelope.from, envelope, label, placeholderKey)
+        ensureE2eeForPeer(envelope.from)
       }
       return
     }
@@ -528,16 +642,18 @@ export function useMeshApp() {
     localName,
     nodeId,
     bridgeUrl,
+    transportMode,
     meshState,
     meshError,
     peers,
     groups,
     chatThreads,
-    omemoSessions,
+    e2eeSessions,
     getThreadEncryptionEnabled,
     setThreadEncryption,
     getHandshakeStatusByPeer,
-    ensureOmemoForPeer,
+    getHandshakeErrorByPeer,
+    ensureE2eeForPeer,
     startMesh,
     stopMesh,
     openOrCreatePeerChat,

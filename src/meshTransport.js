@@ -6,15 +6,16 @@ export function createMeshTransport(config) {
   return isNative ? createNativeTransport(config) : createBridgeTransport(config)
 }
 
-function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError }) {
+function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, transportMode }) {
   let peerListener = null
   let packetListener = null
+  let errorListener = null
 
   return {
     async start() {
       await this.stop()
 
-      await Mesh.start({ nodeId, displayName, udpPort: 41234, capabilities })
+      await Mesh.start({ nodeId, displayName, udpPort: 41234, capabilities, transport: transportMode || 'lan' })
 
       peerListener = await Mesh.addListener('peersUpdate', (event) => {
         onPeers(event.peers || [])
@@ -27,6 +28,10 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
         } catch {
           // ignore
         }
+      })
+
+      errorListener = await Mesh.addListener('error', (event) => {
+        onError(event?.message || 'Native mesh error')
       })
 
       const res = await Mesh.getPeers()
@@ -43,6 +48,10 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
         await packetListener.remove()
         packetListener = null
       }
+      if (errorListener) {
+        await errorListener.remove()
+        errorListener = null
+      }
       try {
         await Mesh.stop()
       } catch {
@@ -57,7 +66,7 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
   }
 }
 
-function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl }) {
+function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl, transportMode }) {
   let ws = null
 
   return {
@@ -71,7 +80,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
           ws.send(
             JSON.stringify({
               action: 'start',
-              payload: { nodeId, displayName, capabilities }
+              payload: { nodeId, displayName, capabilities, transport: transportMode || 'hybrid' }
             })
           )
           ws.send(JSON.stringify({ action: 'getPeers' }))

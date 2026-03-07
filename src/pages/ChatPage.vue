@@ -4,7 +4,7 @@
       <h2>{{ label }}</h2>
       <p class="small">
         {{ chatType === 'group' ? 'Групповой чат' : 'Личный чат' }}
-        <span v-if="chatType === 'peer'" class="omemo-badge" :class="isEncrypted ? 'encrypted' : 'plain'">
+        <span v-if="chatType === 'peer'" class="e2ee-badge" :class="isEncrypted ? 'encrypted' : 'plain'">
           {{ isEncrypted ? '🔒 Зашифрован' : '🔓 Нет шифрования' }}
         </span>
       </p>
@@ -24,7 +24,7 @@
       <div v-for="item in messages" :key="item.localKey" :class="['bubble', item.outgoing ? 'out' : 'in']">
         <div class="meta">
           {{ item.outgoing ? 'Ты' : item.from }} • {{ formatTime(item.ts) }}
-          <span v-if="item.encrypted" class="lock-icon" title="OMEMO">🔒</span>
+          <span v-if="item.encrypted" class="lock-icon" title="AES">🔒</span>
         </div>
         <div v-if="item.decryptFailed" class="decrypt-error">🔒 Зашифровано — ключ недоступен</div>
         <div v-else>{{ item.text }}</div>
@@ -64,20 +64,21 @@ const {
   formatTime,
   peers,
   groups,
-  omemoSessions,
+  e2eeSessions,
   openOrCreatePeerChat,
   openOrCreateGroupChat,
   getThreadEncryptionEnabled,
   setThreadEncryption,
   getHandshakeStatusByPeer,
-  ensureOmemoForPeer
+  getHandshakeErrorByPeer,
+  ensureE2eeForPeer
 } = useMeshApp()
 
 const threadKey = computed(() => `${props.chatType}:${props.chatId}`)
 const label = computed(() => getThreadLabel(threadKey.value))
 const messages = computed(() => getMessages(threadKey.value))
 const isEncrypted = computed(() =>
-  props.chatType === 'peer' && omemoSessions.value.has(props.chatId)
+  props.chatType === 'peer' && e2eeSessions.value.has(props.chatId)
 )
 const secureEnabled = computed(() =>
   props.chatType === 'peer' && getThreadEncryptionEnabled(threadKey.value)
@@ -90,7 +91,9 @@ const secureStatusText = computed(() => {
   if (!secureEnabled.value) return 'Режим выключен'
   if (secureStatus.value === 'ready') return 'Сессия готова'
   if (secureStatus.value === 'pending') return 'Ожидание обмена ключами...'
-  if (secureStatus.value === 'failed') return 'Ошибка обмена ключами'
+  if (secureStatus.value === 'failed') {
+    return getHandshakeErrorByPeer(props.chatId) || 'Ошибка обмена ключами'
+  }
   return 'Инициализация...'
 })
 
@@ -103,7 +106,7 @@ watch(
       const peer = peers.value.find((p) => p.nodeId === id)
       if (peer) openOrCreatePeerChat(peer)
       if (getThreadEncryptionEnabled(`peer:${id}`)) {
-        await ensureOmemoForPeer(id)
+        await ensureE2eeForPeer(id)
       }
     }
 
