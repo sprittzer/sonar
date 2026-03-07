@@ -1,4 +1,4 @@
-package com.tania.calculator;
+package com.tania.shmax;
 
 import android.os.Bundle;
 

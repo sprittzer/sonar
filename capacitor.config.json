@@ -1,6 +1,6 @@
 {
-  "appId": "com.tania.calculator",
-  "appName": "Vue Calculator",
+  "appId": "com.tania.shmax",
+  "appName": "SHMAX",
   "webDir": "dist",
   "bundledWebRuntime": false
 }

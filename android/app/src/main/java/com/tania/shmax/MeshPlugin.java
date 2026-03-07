@@ -1,4 +1,4 @@
-package com.tania.calculator;
+package com.tania.shmax;
 
 import android.Manifest;
 import android.bluetooth.BluetoothAdapter;

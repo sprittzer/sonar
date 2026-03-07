@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core'
 import { computed, ref, watch } from 'vue'
 import { createMeshTransport } from '../meshTransport'
+import { createLogger } from '../logger'
 import {
   initE2ee,
   getOwnPublicKeyB64,
@@ -14,6 +15,7 @@ import {
 const PROFILE_KEY = 'hex_mesh_profile_v1'
 const GROUPS_KEY = 'hex_mesh_groups_v1'
 const ENCRYPTION_PREFS_KEY = 'hex_mesh_encryption_prefs_v1'
+const log = createLogger('useMeshApp')
 
 function loadJson(key, fallback) {
   try {
@@ -320,6 +322,13 @@ async function setThreadEncryption(threadKey, enabled) {
 
 async function startMesh() {
   meshError.value = ''
+  log.info('startMesh requested', {
+    nodeId: nodeId.value,
+    localName: localName.value,
+    bridgeUrl: bridgeUrl.value,
+    transportMode: transportMode.value,
+    signalRoom: signalRoom.value
+  })
 
   if (!localName.value.trim()) {
     meshError.value = 'Укажи ник.'
@@ -342,6 +351,7 @@ async function startMesh() {
       signalRoom: signalRoom.value,
       transportMode: transportMode.value,
       onPeers(nextPeers) {
+        log.debug('onPeers', { count: (nextPeers || []).length })
         peers.value = nextPeers || []
 
         peers.value.forEach((peer) => {
@@ -352,17 +362,21 @@ async function startMesh() {
         })
       },
       onPacket(envelope) {
+        log.debug('onPacket', { type: envelope?.type, from: envelope?.from, to: envelope?.to, msgId: envelope?.msgId })
         onMeshEnvelope(envelope)
       },
       onState(state) {
+        log.info('mesh state', state)
         meshState.value = state
       },
       onError(message) {
+        log.error('mesh error', message)
         meshError.value = message
       }
     })
 
     await mesh.start()
+    log.info('mesh started')
 
     // Initialise E2EE and broadcast our public key bundle to all peers
     try {
@@ -383,11 +397,12 @@ async function startMesh() {
         await broadcastOwnKeyBundle()
       }
     } catch (e) {
-      console.warn('E2EE init failed:', e)
+      log.warn('E2EE init failed', e)
     }
 
     return true
   } catch (error) {
+    log.error('startMesh failed', error?.message || 'unknown')
     meshError.value = `Mesh start error: ${error?.message || 'unknown'}`
     meshState.value = 'error'
     return false
@@ -395,6 +410,7 @@ async function startMesh() {
 }
 
 async function stopMesh() {
+  log.info('stopMesh requested')
   await endVideoCall(false)
   if (mesh) {
     await mesh.stop()
@@ -402,10 +418,12 @@ async function stopMesh() {
   }
   peers.value = []
   meshState.value = 'stopped'
+  log.info('mesh stopped')
 }
 
 async function sendEnvelope(envelope) {
   if (!mesh) throw new Error('Mesh is not running')
+  log.debug('sendEnvelope', { type: envelope?.type, to: envelope?.to, msgId: envelope?.msgId })
   await mesh.sendPacket(envelope)
 }
 
@@ -527,6 +545,7 @@ async function flushPendingRemoteIce() {
 
 async function startVideoCall(peerId) {
   callError.value = ''
+  log.info('startVideoCall', { peerId })
   if (!mesh || meshState.value !== 'running') {
     throw new Error('Mesh не запущен.')
   }
@@ -550,6 +569,7 @@ async function startVideoCall(peerId) {
 
 async function acceptIncomingCall() {
   const peerId = incomingCallFrom.value
+  log.info('acceptIncomingCall', { peerId })
   if (!peerId) return
   callError.value = ''
   try {
@@ -574,6 +594,7 @@ async function acceptIncomingCall() {
 
 async function rejectIncomingCall() {
   const peerId = incomingCallFrom.value
+  log.info('rejectIncomingCall', { peerId })
   incomingCallFrom.value = ''
   if (!peerId) return
   await sendEnvelope({
@@ -591,6 +612,7 @@ async function rejectIncomingCall() {
 
 async function endVideoCall(notifyPeer = true) {
   const peerId = currentCallPeerId.value
+  log.info('endVideoCall', { notifyPeer, peerId })
   if (notifyPeer && peerId) {
     try {
       await sendEnvelope({
@@ -790,6 +812,7 @@ function onMeshEnvelope(envelope) {
   if (!envelope?.msgId || seen.has(envelope.msgId)) return
   seen.add(envelope.msgId)
   if (seen.size > 10000) seen.clear()
+  log.debug('onMeshEnvelope', { type: envelope.type, from: envelope.from, to: envelope.to, msgId: envelope.msgId })
 
   const payload = envelope.payload || {}
 
@@ -803,14 +826,14 @@ function onMeshEnvelope(envelope) {
             e2eeSessions.value = new Set([...e2eeSessions.value, peerId])
             e2eeHandshakeByPeer.value[peerId] = 'ready'
             // Reply with our own key bundle so the peer can also establish a session
-            broadcastOwnKeyBundle(peerId).catch((e) => console.warn('E2EE: failed to send own key bundle:', e))
+            broadcastOwnKeyBundle(peerId).catch((e) => log.warn('E2EE: failed to send own key bundle', e))
             retryPendingEncrypted(peerId)
           }
         })
         .catch((e) => {
           e2eeHandshakeByPeer.value[peerId] = 'failed'
           e2eeErrorByPeer.value[peerId] = e?.message || 'Ошибка обработки key bundle.'
-          console.warn('E2EE: processKeyBundle failed:', e)
+          log.warn('E2EE: processKeyBundle failed', e)
         })
     }
     return
@@ -819,7 +842,7 @@ function onMeshEnvelope(envelope) {
   if (envelope.type === 'E2EE_KEY_REQUEST') {
     if (envelope.to && envelope.to !== '*' && envelope.to !== nodeId.value) return
     broadcastOwnKeyBundle(envelope.from).catch((e) => {
-      console.warn('E2EE: failed to reply with key bundle:', e)
+      log.warn('E2EE: failed to reply with key bundle', e)
     })
     return
   }

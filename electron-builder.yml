@@ -1,5 +1,5 @@
 appId: com.tania.hexmesh.desktop
-productName: Hex Mesh Messenger
+productName: SHMAX
 asar: true
 asarUnpack:
   - signaling/**

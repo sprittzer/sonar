@@ -1,7 +1,9 @@
 import { Capacitor } from '@capacitor/core'
 import Mesh from './mesh.js'
+import { createLogger } from './logger'
 
 const DEFAULT_SIGNAL_HOST = '155.212.168.250'
+const log = createLogger('meshTransport')
 
 export function createMeshTransport(config) {
   const isNative = Capacitor.isNativePlatform()
@@ -16,16 +18,19 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
   return {
     async start() {
       await this.stop()
+      log.info('native start', { nodeId, displayName, transportMode: transportMode || 'lan' })
 
       await Mesh.start({ nodeId, displayName, udpPort: 41234, capabilities, transport: transportMode || 'lan' })
 
       peerListener = await Mesh.addListener('peersUpdate', (event) => {
+        log.debug('native peersUpdate', { count: (event.peers || []).length })
         onPeers(event.peers || [])
       })
 
       packetListener = await Mesh.addListener('meshPacket', (event) => {
         if (!event?.envelope) return
         try {
+          log.debug('native meshPacket')
           onPacket(JSON.parse(event.envelope))
         } catch {
           // ignore
@@ -33,12 +38,14 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
       })
 
       errorListener = await Mesh.addListener('error', (event) => {
+        log.error('native error', event?.message || 'Native mesh error')
         onError(event?.message || 'Native mesh error')
       })
 
       const res = await Mesh.getPeers()
       onPeers(res.peers || [])
       onState('running')
+      log.info('native running', { peers: (res.peers || []).length })
     },
 
     async stop() {
@@ -60,9 +67,11 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
         // ignore
       }
       onState('stopped')
+      log.info('native stopped')
     },
 
     async sendPacket(envelope) {
+      log.debug('native sendPacket', { type: envelope?.type, to: envelope?.to, msgId: envelope?.msgId })
       await Mesh.sendPacket({ envelope })
     }
   }
@@ -140,9 +149,11 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
       const normalizedTransport = transportMode === 'ble' ? 'bluetooth' : (transportMode || 'hybrid')
       const urls = candidateUrls(bridgeUrl).map((u) => withServerQuery(u))
       let lastError = null
+      log.info('bridge start', { nodeId, displayName, isHelperMode, transport: normalizedTransport, urls })
 
       for (const url of urls) {
         try {
+          log.info('bridge connect attempt', { url })
           await new Promise((resolve, reject) => {
             const socket = new WebSocket(url)
             let opened = false
@@ -151,6 +162,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
             const fail = (err) => {
               if (settled) return
               settled = true
+              log.warn('bridge connect failed', { url, reason: err?.message || 'unknown' })
               try {
                 socket.close()
               } catch {
@@ -165,6 +177,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
               ws = socket
               resolved = true
               onState('running')
+              log.info('bridge connected', { url })
               resolve()
             }
 
@@ -193,9 +206,11 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
               }
 
               if (msg.event === 'state') {
+                log.debug('bridge state event', { state: msg.payload?.state || 'unknown' })
                 onState(msg.payload?.state || 'unknown')
               }
               if (msg.event === 'error') {
+                log.error('bridge event error', msg.payload?.message || 'bridge error')
                 onError(msg.payload?.message || 'bridge error')
               }
               if (msg.event === 'peersUpdate') {
@@ -269,6 +284,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
               if (ws === socket) {
                 ws = null
                 onState('stopped')
+                log.warn('bridge closed', { url })
               }
             }
 
@@ -279,10 +295,12 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
           lastError = err
           resolved = false
           ws = null
+          log.warn('bridge attempt failed', { url, error: err?.message || 'unknown' })
         }
       }
 
       onError('Bridge websocket connection failed')
+      log.error('bridge start failed', lastError?.message || 'Bridge websocket connection failed')
       throw (lastError || new Error('Bridge websocket connection failed'))
     },
 
@@ -299,12 +317,15 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
       }
       signalingPeers.clear()
       onState('stopped')
+      log.info('bridge stopped')
     },
 
     async sendPacket(envelope) {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log.error('bridge sendPacket while disconnected', { type: envelope?.type, to: envelope?.to })
         throw new Error('Bridge is not connected')
       }
+      log.debug('bridge sendPacket', { type: envelope?.type, to: envelope?.to, msgId: envelope?.msgId })
       // Protocol A
       ws.send(JSON.stringify({ action: 'sendPacket', payload: { envelope } }))
       // Protocol B
