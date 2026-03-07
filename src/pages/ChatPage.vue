@@ -8,6 +8,16 @@
           {{ isEncrypted ? '🔒 Зашифрован' : '🔓 Нет шифрования' }}
         </span>
       </p>
+      <div v-if="chatType === 'peer'" class="secure-controls">
+        <label class="secure-toggle">
+          <input type="checkbox" :checked="secureEnabled" @change="onSecureToggle" />
+          <span>Шифровать чат</span>
+        </label>
+        <span class="secure-status" :class="`status-${secureStatus}`">
+          {{ secureStatusText }}
+        </span>
+      </div>
+      <p v-if="sendError" class="send-error">{{ sendError }}</p>
     </div>
 
     <div class="messages">
@@ -45,6 +55,7 @@ const props = defineProps({
 })
 
 const chatInput = ref('')
+const sendError = ref('')
 const {
   getMessages,
   getThreadLabel,
@@ -55,7 +66,11 @@ const {
   groups,
   omemoSessions,
   openOrCreatePeerChat,
-  openOrCreateGroupChat
+  openOrCreateGroupChat,
+  getThreadEncryptionEnabled,
+  setThreadEncryption,
+  getHandshakeStatusByPeer,
+  ensureOmemoForPeer
 } = useMeshApp()
 
 const threadKey = computed(() => `${props.chatType}:${props.chatId}`)
@@ -64,15 +79,32 @@ const messages = computed(() => getMessages(threadKey.value))
 const isEncrypted = computed(() =>
   props.chatType === 'peer' && omemoSessions.value.has(props.chatId)
 )
+const secureEnabled = computed(() =>
+  props.chatType === 'peer' && getThreadEncryptionEnabled(threadKey.value)
+)
+const secureStatus = computed(() => {
+  if (props.chatType !== 'peer') return 'idle'
+  return getHandshakeStatusByPeer(props.chatId)
+})
+const secureStatusText = computed(() => {
+  if (!secureEnabled.value) return 'Режим выключен'
+  if (secureStatus.value === 'ready') return 'Сессия готова'
+  if (secureStatus.value === 'pending') return 'Ожидание обмена ключами...'
+  if (secureStatus.value === 'failed') return 'Ошибка обмена ключами'
+  return 'Инициализация...'
+})
 
 watch(
   () => [props.chatType, props.chatId],
-  ([type, id]) => {
+  async ([type, id]) => {
     if (!type || !id) return
 
     if (type === 'peer') {
       const peer = peers.value.find((p) => p.nodeId === id)
       if (peer) openOrCreatePeerChat(peer)
+      if (getThreadEncryptionEnabled(`peer:${id}`)) {
+        await ensureOmemoForPeer(id)
+      }
     }
 
     if (type === 'group') {
@@ -80,16 +112,36 @@ watch(
       if (group) openOrCreateGroupChat(group)
     }
 
+    sendError.value = ''
     markThreadRead(`${type}:${id}`)
   },
   { immediate: true }
 )
 
+async function onSecureToggle(event) {
+  sendError.value = ''
+  const nextEnabled = event.target.checked
+  await setThreadEncryption(threadKey.value, nextEnabled)
+}
+
 async function send() {
   const text = chatInput.value.trim()
   if (!text) return
-  await sendChatToThread(threadKey.value, text)
-  chatInput.value = ''
-  markThreadRead(threadKey.value)
+  sendError.value = ''
+  try {
+    await sendChatToThread(threadKey.value, text)
+    chatInput.value = ''
+    markThreadRead(threadKey.value)
+  } catch (e) {
+    sendError.value = e?.message || 'Не удалось отправить сообщение.'
+  }
 }
 </script>
+
+<style scoped>
+.secure-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+</style>

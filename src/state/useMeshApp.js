@@ -13,9 +13,7 @@ import {
 
 const PROFILE_KEY = 'hex_mesh_profile_v1'
 const GROUPS_KEY = 'hex_mesh_groups_v1'
-
-// Track which peers have confirmed OMEMO sessions (reactive so UI can respond)
-const omemoSessions = ref(new Set())
+const ENCRYPTION_PREFS_KEY = 'hex_mesh_encryption_prefs_v1'
 
 function loadJson(key, fallback) {
   try {
@@ -30,6 +28,11 @@ function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value))
 }
 
+// Track which peers have confirmed OMEMO sessions (reactive so UI can respond)
+const omemoSessions = ref(new Set())
+const encryptionByThread = ref(loadJson(ENCRYPTION_PREFS_KEY, {}))
+const omemoHandshakeByPeer = ref({}) // peerId -> idle|pending|ready|failed
+
 const isNative = Capacitor.isNativePlatform()
 const persisted = loadJson(PROFILE_KEY, null)
 
@@ -37,6 +40,7 @@ const localName = ref(persisted?.localName || 'User')
 const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2, 10)}`)
 const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
 
+watch(encryptionByThread, () => saveJson(ENCRYPTION_PREFS_KEY, encryptionByThread.value), { deep: true })
 watch([localName, nodeId, bridgeUrl], () => {
   saveJson(PROFILE_KEY, {
     localName: localName.value,
@@ -172,6 +176,53 @@ function getMessages(threadKey) {
   return chatsByThread.value[threadKey] || []
 }
 
+function getPeerIdFromThread(threadKey) {
+  if (!threadKey || !threadKey.startsWith('peer:')) return ''
+  return threadKey.replace('peer:', '')
+}
+
+function getHandshakeStatusByPeer(peerId) {
+  if (!peerId) return 'idle'
+  if (hasSession(peerId)) return 'ready'
+  return omemoHandshakeByPeer.value[peerId] || 'idle'
+}
+
+function getThreadEncryptionEnabled(threadKey) {
+  return Boolean(encryptionByThread.value[threadKey])
+}
+
+async function ensureOmemoForPeer(peerId) {
+  if (!peerId) return false
+  if (hasSession(peerId)) {
+    omemoHandshakeByPeer.value[peerId] = 'ready'
+    omemoSessions.value = new Set([...omemoSessions.value, peerId])
+    return true
+  }
+
+  omemoHandshakeByPeer.value[peerId] = 'pending'
+  try {
+    await broadcastOwnKeyBundle()
+    return false
+  } catch {
+    omemoHandshakeByPeer.value[peerId] = 'failed'
+    return false
+  }
+}
+
+async function setThreadEncryption(threadKey, enabled) {
+  if (!threadKey?.startsWith('peer:')) return
+  if (enabled) {
+    encryptionByThread.value = { ...encryptionByThread.value, [threadKey]: true }
+    const peerId = getPeerIdFromThread(threadKey)
+    await ensureOmemoForPeer(peerId)
+    return
+  }
+
+  const next = { ...encryptionByThread.value }
+  delete next[threadKey]
+  encryptionByThread.value = next
+}
+
 async function startMesh() {
   meshError.value = ''
 
@@ -223,6 +274,7 @@ async function startMesh() {
       // Re-establish sessions when another tab shares a key bundle
       onSessionEstablished((peerId) => {
         omemoSessions.value = new Set([...omemoSessions.value, peerId])
+        omemoHandshakeByPeer.value[peerId] = 'ready'
       })
 
       await broadcastOwnKeyBundle()
@@ -278,13 +330,17 @@ async function sendChatToThread(threadKey, text) {
     const peerId = threadKey.replace('peer:', '')
     const ts = Date.now()
     const msgId = nextMsgId('chat')
+    const secureEnabled = getThreadEncryptionEnabled(threadKey)
 
-    // Build payload – encrypt when an OMEMO session exists for this peer
     let payload
     let displayText = normalized
     let encrypted = false
 
-    if (hasSession(peerId)) {
+    if (secureEnabled) {
+      if (!hasSession(peerId)) {
+        await ensureOmemoForPeer(peerId)
+        throw new Error('Шифрование включено, но защищенная сессия еще не готова. Подождите обмена ключами.')
+      }
       try {
         const omemo = await encryptMessage(peerId, normalized)
         payload = {
@@ -295,8 +351,7 @@ async function sendChatToThread(threadKey, text) {
         }
         encrypted = true
       } catch (e) {
-        console.warn('OMEMO encrypt failed, sending plaintext:', e)
-        payload = { text: normalized, ts, fromName: localName.value || nodeId.value }
+        throw new Error(`Не удалось зашифровать сообщение: ${e?.message || 'unknown error'}`)
       }
     } else {
       payload = { text: normalized, ts, fromName: localName.value || nodeId.value }
@@ -374,11 +429,15 @@ function onMeshEnvelope(envelope) {
         .then(() => {
           if (hasSession(peerId)) {
             omemoSessions.value = new Set([...omemoSessions.value, peerId])
+            omemoHandshakeByPeer.value[peerId] = 'ready'
             // Reply with our own key bundle so the peer can also establish a session
             broadcastOwnKeyBundle().catch((e) => console.warn('OMEMO: failed to send own key bundle:', e))
           }
         })
-        .catch((e) => console.warn('OMEMO: processKeyBundle failed:', e))
+        .catch((e) => {
+          omemoHandshakeByPeer.value[peerId] = 'failed'
+          console.warn('OMEMO: processKeyBundle failed:', e)
+        })
     }
     return
   }
@@ -398,34 +457,33 @@ function onMeshEnvelope(envelope) {
               localKey: `${envelope.msgId}-in`,
               text: plaintext,
               ts: payload.ts || Date.now(),
-              from: payload.fromName || envelope.from,
+              from: label,
               outgoing: false,
               encrypted: true
-            }, true)
+            })
           })
-          .catch((e) => {
-            console.warn('OMEMO: decryption failed:', e)
+          .catch(() => {
             pushMessage(threadKey, {
-              localKey: `${envelope.msgId}-in`,
-              text: '',
+              localKey: `${envelope.msgId}-in-failed`,
+              text: '[Не удалось расшифровать сообщение]',
               ts: payload.ts || Date.now(),
-              from: payload.fromName || envelope.from,
+              from: label,
               outgoing: false,
               encrypted: true,
               decryptFailed: true
-            }, true)
+            })
           })
       } else {
-        // No session yet – store a placeholder; it will not be retried automatically
         pushMessage(threadKey, {
-          localKey: `${envelope.msgId}-in`,
-          text: '',
+          localKey: `${envelope.msgId}-in-nosession`,
+          text: '[Зашифрованное сообщение: сессия еще не установлена]',
           ts: payload.ts || Date.now(),
-          from: payload.fromName || envelope.from,
+          from: label,
           outgoing: false,
           encrypted: true,
           decryptFailed: true
-        }, true)
+        })
+        ensureOmemoForPeer(envelope.from)
       }
       return
     }
@@ -476,6 +534,10 @@ export function useMeshApp() {
     groups,
     chatThreads,
     omemoSessions,
+    getThreadEncryptionEnabled,
+    setThreadEncryption,
+    getHandshakeStatusByPeer,
+    ensureOmemoForPeer,
     startMesh,
     stopMesh,
     openOrCreatePeerChat,
