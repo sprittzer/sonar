@@ -217,7 +217,7 @@ async function ensureOmemoForPeer(peerId) {
     console.log(`[OMEMO] Waiting for OMEMO initialization before starting handshake with ${peerId}`)
     const startWait = Date.now()
     while (!omemoReady && (Date.now() - startWait) < 5000) {
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await new Promise(resolve => setTimeout(resolve, 1000))
     }
     if (!omemoReady) {
       console.warn(`[OMEMO] OMEMO initialization timeout, cannot start handshake with ${peerId}`)
