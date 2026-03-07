@@ -1,9 +1,21 @@
 package com.tania.calculator;
 
 import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.le.AdvertiseCallback;
+import android.bluetooth.le.AdvertiseData;
+import android.bluetooth.le.AdvertiseSettings;
+import android.bluetooth.le.BluetoothLeAdvertiser;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanFilter;
+import android.bluetooth.le.ScanResult;
+import android.bluetooth.le.ScanSettings;
 import android.content.Context;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.os.ParcelUuid;
 import android.net.wifi.WifiManager;
 import android.util.Log;
 
@@ -48,6 +60,16 @@ import java.util.concurrent.TimeUnit;
                 Manifest.permission.CHANGE_WIFI_MULTICAST_STATE
             },
             alias = "meshNet"
+        ),
+        @Permission(
+            strings = {
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.BLUETOOTH_ADMIN,
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            },
+            alias = "meshBle"
         )
     }
 )
@@ -55,6 +77,10 @@ public class MeshPlugin extends Plugin {
 
     private static final String TAG = "MeshPlugin";
     private static final String MDNS_TYPE = "_hexmesh._udp.";
+    private static final String TRANSPORT_LAN = "lan";
+    private static final String TRANSPORT_BLE = "ble";
+    private static final String TRANSPORT_HYBRID = "hybrid";
+    private static final ParcelUuid BLE_SERVICE_UUID = ParcelUuid.fromString("12345678-1234-5678-1234-56789abc0001");
 
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
     private final Set<String> seenMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -62,6 +88,7 @@ public class MeshPlugin extends Plugin {
     private volatile boolean running = false;
     private String nodeId = "";
     private String displayName = "User";
+    private String transportMode = TRANSPORT_LAN;
     private int udpPort = 41234;
     private List<String> capabilities = new ArrayList<>();
 
@@ -74,6 +101,12 @@ public class MeshPlugin extends Plugin {
     private NsdManager.DiscoveryListener discoveryListener;
     private WifiManager.MulticastLock multicastLock;
 
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothLeAdvertiser bleAdvertiser;
+    private BluetoothLeScanner bleScanner;
+    private AdvertiseCallback bleAdvertiseCallback;
+    private ScanCallback bleScanCallback;
+
     @PluginMethod
     public void start(PluginCall call) {
         if (running) {
@@ -83,15 +116,21 @@ public class MeshPlugin extends Plugin {
 
         nodeId = call.getString("nodeId", "n-" + UUID.randomUUID().toString().substring(0, 8));
         displayName = call.getString("displayName", "User");
+        transportMode = call.getString("transport", TRANSPORT_LAN);
         udpPort = call.getInt("udpPort", 41234);
         capabilities = parseCapabilities(call.getArray("capabilities"));
 
         try {
-            setupSocket();
-            setupMulticastLock();
-            startReceiver();
-            startSchedulers();
-            startMdns();
+            if (isLanEnabled()) {
+                setupSocket();
+                setupMulticastLock();
+                startReceiver();
+                startSchedulers();
+                startMdns();
+            }
+            if (isBleEnabled()) {
+                startBle();
+            }
             running = true;
             call.resolve();
         } catch (Exception e) {
@@ -115,6 +154,11 @@ public class MeshPlugin extends Plugin {
 
     @PluginMethod
     public void sendPacket(PluginCall call) {
+        if (!isLanEnabled()) {
+            call.reject("BLE transport currently supports discovery only. Data packets require LAN/hybrid mode.");
+            return;
+        }
+
         JSObject envelopeObj = call.getObject("envelope");
         if (envelopeObj == null) {
             call.reject("Missing envelope");
@@ -173,6 +217,149 @@ public class MeshPlugin extends Plugin {
         scheduler = Executors.newScheduledThreadPool(2);
         scheduler.scheduleAtFixedRate(this::broadcastHello, 200, 1500, TimeUnit.MILLISECONDS);
         scheduler.scheduleAtFixedRate(this::prunePeers, 3, 3, TimeUnit.SECONDS);
+    }
+
+    private boolean isLanEnabled() {
+        return TRANSPORT_LAN.equals(transportMode) || TRANSPORT_HYBRID.equals(transportMode);
+    }
+
+    private boolean isBleEnabled() {
+        return TRANSPORT_BLE.equals(transportMode) || TRANSPORT_HYBRID.equals(transportMode);
+    }
+
+    private void startBle() {
+        try {
+            Context context = getContext();
+            if (context == null) return;
+
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            if (manager == null) return;
+
+            bluetoothAdapter = manager.getAdapter();
+            if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+                emitError("Bluetooth выключен на устройстве.");
+                return;
+            }
+
+            bleAdvertiser = bluetoothAdapter.getBluetoothLeAdvertiser();
+            bleScanner = bluetoothAdapter.getBluetoothLeScanner();
+
+            if (bleAdvertiser != null) startBleAdvertise();
+            if (bleScanner != null) startBleScan();
+        } catch (Exception e) {
+            Log.w(TAG, "BLE init failed", e);
+            emitError("BLE init failed: " + e.getMessage());
+        }
+    }
+
+    private void startBleAdvertise() {
+        byte[] payload = buildBlePayload();
+        AdvertiseSettings settings = new AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setConnectable(false)
+            .setTimeout(0)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .build();
+
+        AdvertiseData data = new AdvertiseData.Builder()
+            .addServiceUuid(BLE_SERVICE_UUID)
+            .addServiceData(BLE_SERVICE_UUID, payload)
+            .build();
+
+        bleAdvertiseCallback = new AdvertiseCallback() {
+            @Override
+            public void onStartFailure(int errorCode) {
+                emitError("BLE advertise failed: " + errorCode);
+            }
+        };
+
+        try {
+            bleAdvertiser.startAdvertising(settings, data, bleAdvertiseCallback);
+        } catch (SecurityException e) {
+            emitError("BLE advertise permission denied: " + e.getMessage());
+        }
+    }
+
+    private void startBleScan() {
+        List<ScanFilter> filters = new ArrayList<>();
+        filters.add(new ScanFilter.Builder().setServiceUuid(BLE_SERVICE_UUID).build());
+
+        ScanSettings settings = new ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build();
+
+        bleScanCallback = new ScanCallback() {
+            @Override
+            public void onScanResult(int callbackType, ScanResult result) {
+                onBleScanResult(result);
+            }
+
+            @Override
+            public void onBatchScanResults(List<ScanResult> results) {
+                for (ScanResult r : results) onBleScanResult(r);
+            }
+
+            @Override
+            public void onScanFailed(int errorCode) {
+                emitError("BLE scan failed: " + errorCode);
+            }
+        };
+
+        try {
+            bleScanner.startScan(filters, settings, bleScanCallback);
+        } catch (SecurityException e) {
+            emitError("BLE scan permission denied: " + e.getMessage());
+        }
+    }
+
+    private void onBleScanResult(ScanResult result) {
+        if (result == null || result.getScanRecord() == null) return;
+        byte[] data = result.getScanRecord().getServiceData(BLE_SERVICE_UUID);
+        if (data == null || data.length == 0) return;
+
+        String text = new String(data, StandardCharsets.UTF_8);
+        String[] parts = text.split("\\|", 2);
+        if (parts.length == 0) return;
+
+        String remoteNodeId = parts[0];
+        String remoteName = parts.length > 1 ? parts[1] : remoteNodeId;
+        if (remoteNodeId.isEmpty() || remoteNodeId.equals(nodeId)) return;
+
+        String address = result.getDevice() != null ? result.getDevice().getAddress() : "ble-unknown";
+        List<String> caps = new ArrayList<>();
+        caps.add("ble");
+        Peer peer = new Peer(remoteNodeId, remoteName, "ble:" + address, -1, caps);
+        peers.put(remoteNodeId, peer);
+        emitPeersUpdate();
+    }
+
+    private byte[] buildBlePayload() {
+        // Keep payload short for BLE service data.
+        String compactName = displayName == null ? "User" : displayName;
+        if (compactName.length() > 16) compactName = compactName.substring(0, 16);
+        String compactNodeId = nodeId == null ? "n-unknown" : nodeId;
+        if (compactNodeId.length() > 20) compactNodeId = compactNodeId.substring(0, 20);
+        return (compactNodeId + "|" + compactName).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void stopBle() {
+        try {
+            if (bleAdvertiser != null && bleAdvertiseCallback != null) {
+                bleAdvertiser.stopAdvertising(bleAdvertiseCallback);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (bleScanner != null && bleScanCallback != null) {
+                bleScanner.stopScan(bleScanCallback);
+            }
+        } catch (Exception ignored) {}
+
+        bleAdvertiseCallback = null;
+        bleScanCallback = null;
+        bleAdvertiser = null;
+        bleScanner = null;
+        bluetoothAdapter = null;
     }
 
     private void startMdns() {
@@ -520,6 +707,7 @@ public class MeshPlugin extends Plugin {
         }
 
         stopMdns();
+        stopBle();
 
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
@@ -529,6 +717,12 @@ public class MeshPlugin extends Plugin {
         peers.clear();
         seenMessageIds.clear();
         emitPeersUpdate();
+    }
+
+    private void emitError(String message) {
+        JSObject event = new JSObject();
+        event.put("message", message);
+        notifyListeners("error", event);
     }
 
     @Override
