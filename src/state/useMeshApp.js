@@ -8,7 +8,8 @@ import {
   hasSession,
   onSessionEstablished,
   encryptMessage,
-  decryptMessage
+  decryptMessage,
+  clearAllSessions
 } from '../omemo'
 
 const PROFILE_KEY = 'hex_mesh_profile_v1'
@@ -205,10 +206,20 @@ function clearHandshakeTimers(peerId) {
 
 async function ensureOmemoForPeer(peerId) {
   if (!peerId) return false
+
+  // Check that mesh is running before attempting handshake
+  if (!mesh || meshState.value !== 'connected') {
+    console.warn(`[OMEMO] Cannot start handshake with ${peerId}: mesh not connected (state: ${meshState.value})`)
+    omemoHandshakeByPeer.value[peerId] = 'failed'
+    return false
+  }
+
   if (hasSession(peerId)) {
     clearHandshakeTimers(peerId)
     omemoHandshakeByPeer.value[peerId] = 'ready'
-    omemoSessions.value = new Set([...omemoSessions.value, peerId])
+    if (!omemoSessions.value.has(peerId)) {
+      omemoSessions.value = new Set([...omemoSessions.value, peerId])
+    }
     return true
   }
 
@@ -288,6 +299,11 @@ async function ensureOmemoForPeer(peerId) {
 async function setThreadEncryption(threadKey, enabled) {
   if (!threadKey?.startsWith('peer:')) return
   if (enabled) {
+    // Check that mesh is running before enabling encryption
+    if (!mesh || meshState.value !== 'connected') {
+      throw new Error('Сначала подключитесь к сети')
+    }
+
     encryptionByThread.value = { ...encryptionByThread.value, [threadKey]: true }
     const peerId = getPeerIdFromThread(threadKey)
     await ensureOmemoForPeer(peerId)
@@ -400,6 +416,13 @@ async function stopMesh() {
   for (const peerId of omemoHandshakeTimers.keys()) {
     clearHandshakeTimers(peerId)
   }
+
+  // Reset OMEMO handshake statuses
+  omemoHandshakeByPeer.value = {}
+  omemoSessions.value = new Set()
+
+  // Clear all OMEMO session keys
+  clearAllSessions()
 }
 
 async function sendEnvelope(envelope) {
@@ -469,6 +492,11 @@ async function sendChatToThread(threadKey, text) {
   if (!normalized) return
 
   if (threadKey.startsWith('peer:')) {
+    // Check that mesh is running
+    if (!mesh || meshState.value !== 'connected') {
+      throw new Error('Не подключен к сети')
+    }
+
     const peerId = threadKey.replace('peer:', '')
     const ts = Date.now()
     const msgId = nextMsgId('chat')
@@ -586,15 +614,11 @@ function onMeshEnvelope(envelope) {
         .then(() => {
           if (hasSession(peerId)) {
             clearHandshakeTimers(peerId)
-            omemoSessions.value = new Set([...omemoSessions.value, peerId])
+            if (!omemoSessions.value.has(peerId)) {
+              omemoSessions.value = new Set([...omemoSessions.value, peerId])
+            }
             omemoHandshakeByPeer.value[peerId] = 'ready'
             console.log(`[OMEMO] ✓ Session established with peer ${peerId}`)
-            // Send our key bundle back if we haven't established session yet
-            if (!hasSession(envelope.from)) {
-              sendKeyBundleToPeer(envelope.from).catch((e) =>
-                console.warn('[OMEMO] Failed to send key bundle back:', e)
-              )
-            }
           }
         })
         .catch((e) => {

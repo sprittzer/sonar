@@ -140,6 +140,14 @@ export function hasSession(peerId) {
 }
 
 /**
+ * Clear all OMEMO sessions. Useful when disconnecting from mesh.
+ */
+export function clearAllSessions() {
+  _sessionKeys.clear()
+  console.log('[OMEMO] All sessions cleared')
+}
+
+/**
  * Register a callback that is invoked whenever a new session is established.
  * @param {(peerId: string) => void} fn
  */
