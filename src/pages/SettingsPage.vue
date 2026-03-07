@@ -4,7 +4,7 @@
     <div class="settings-grid">
       <input v-model.trim="localName" class="input" placeholder="Твой ник" />
       <input v-model.trim="nodeId" class="input" placeholder="user id" />
-      <input v-if="!isNative" v-model.trim="bridgeUrl" class="input" placeholder="ws://127.0.0.1:8788" />
+      <input v-if="!isNative" v-model.trim="bridgeUrl" class="input" placeholder="пусто = ws://155.212.168.250:80" />
       <input v-if="!isNative" v-model.trim="signalRoom" class="input" placeholder="signal room (default)" />
       <select v-model="transportMode" class="input">
         <option value="lan">LAN (Wi-Fi)</option>

@@ -12,3 +12,7 @@ android/local.properties
 android/captures/
 android/capacitor-cordova-android-plugins/
 release
+__pycache__/
+*.pyc
+signaling/.env
+backend/signaling-server/.env
