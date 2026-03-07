@@ -6,9 +6,20 @@ export function createMeshTransport(config) {
   return isNative ? createNativeTransport(config) : createBridgeTransport(config)
 }
 
-function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError }) {
+function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onPeersDelta, onPacket, onState, onError }) {
   let peerListener = null
   let packetListener = null
+  let lastPeerIds = new Set()
+
+  function emitPeers(nextPeers) {
+    const peers = nextPeers || []
+    const nextIds = new Set(peers.map((p) => p.nodeId).filter(Boolean))
+    const added = peers.filter((p) => p?.nodeId && !lastPeerIds.has(p.nodeId))
+    const removed = [...lastPeerIds].filter((id) => !nextIds.has(id))
+    lastPeerIds = nextIds
+    onPeers(peers)
+    onPeersDelta?.(added, removed)
+  }
 
   return {
     async start() {
@@ -17,7 +28,7 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
       await Mesh.start({ nodeId, displayName, udpPort: 41234, capabilities })
 
       peerListener = await Mesh.addListener('peersUpdate', (event) => {
-        onPeers(event.peers || [])
+        emitPeers(event.peers || [])
       })
 
       packetListener = await Mesh.addListener('meshPacket', (event) => {
@@ -30,7 +41,7 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
       })
 
       const res = await Mesh.getPeers()
-      onPeers(res.peers || [])
+      emitPeers(res.peers || [])
       onState('running')
     },
 
@@ -48,6 +59,7 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
       } catch {
         // ignore
       }
+      lastPeerIds = new Set()
       onState('stopped')
     },
 
@@ -57,8 +69,19 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
   }
 }
 
-function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl }) {
+function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPeersDelta, onPacket, onState, onError, bridgeUrl }) {
   let ws = null
+  let lastPeerIds = new Set()
+
+  function emitPeers(nextPeers) {
+    const peers = nextPeers || []
+    const nextIds = new Set(peers.map((p) => p.nodeId).filter(Boolean))
+    const added = peers.filter((p) => p?.nodeId && !lastPeerIds.has(p.nodeId))
+    const removed = [...lastPeerIds].filter((id) => !nextIds.has(id))
+    lastPeerIds = nextIds
+    onPeers(peers)
+    onPeersDelta?.(added, removed)
+  }
 
   return {
     async start() {
@@ -95,11 +118,20 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
           }
 
           if (msg.event === 'peersUpdate') {
-            onPeers(msg.payload?.peers || [])
+            emitPeers(msg.payload?.peers || [])
           }
 
           if (msg.event === 'meshPacket') {
-            onPacket(msg.payload?.envelope)
+            let envelope = msg.payload?.envelope
+            // Bridge may send envelope as JSON string – parse it
+            if (typeof envelope === 'string') {
+              try {
+                envelope = JSON.parse(envelope)
+              } catch {
+                // ignore malformed envelope
+              }
+            }
+            onPacket(envelope)
           }
         }
 
@@ -129,6 +161,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
         ws.close()
         ws = null
       }
+      lastPeerIds = new Set()
       onState('stopped')
     },
 

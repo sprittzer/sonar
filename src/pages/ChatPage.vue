@@ -14,8 +14,17 @@
           <span>Шифровать чат</span>
         </label>
         <span class="secure-status" :class="`status-${secureStatus}`">
+          <span v-if="secureStatus === 'pending'" class="spinner"></span>
           {{ secureStatusText }}
         </span>
+        <button
+          v-if="secureEnabled && secureStatus === 'failed'"
+          class="retry-btn"
+          @click="retryHandshake"
+          title="Повторить обмен ключами"
+        >
+          🔄 Повторить
+        </button>
       </div>
       <p v-if="sendError" class="send-error">{{ sendError }}</p>
     </div>
@@ -124,6 +133,13 @@ async function onSecureToggle(event) {
   await setThreadEncryption(threadKey.value, nextEnabled)
 }
 
+async function retryHandshake() {
+  sendError.value = ''
+  if (props.chatType === 'peer' && props.chatId) {
+    await ensureOmemoForPeer(props.chatId)
+  }
+}
+
 async function send() {
   const text = chatInput.value.trim()
   if (!text) return
@@ -143,5 +159,84 @@ async function send() {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-top: 8px;
+}
+
+.secure-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.retry-btn {
+  padding: 4px 12px;
+  font-size: 0.85em;
+  border: 1px solid #f44336;
+  background: white;
+  color: #f44336;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.retry-btn:hover {
+  background: #f44336;
+  color: white;
+}
+
+.secure-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9em;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.status-idle {
+  color: #666;
+  background: #f0f0f0;
+}
+
+.status-pending {
+  color: #ff9800;
+  background: #fff3e0;
+  font-weight: 500;
+}
+
+.status-ready {
+  color: #4caf50;
+  background: #e8f5e9;
+  font-weight: 500;
+}
+
+.status-failed {
+  color: #f44336;
+  background: #ffebee;
+  font-weight: 500;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 152, 0, 0.3);
+  border-top-color: #ff9800;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.send-error {
+  color: #f44336;
+  font-size: 0.9em;
+  margin-top: 8px;
+  padding: 8px;
+  background: #ffebee;
+  border-radius: 4px;
+  border-left: 3px solid #f44336;
 }
 </style>

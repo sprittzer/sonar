@@ -32,6 +32,7 @@ function saveJson(key, value) {
 const omemoSessions = ref(new Set())
 const encryptionByThread = ref(loadJson(ENCRYPTION_PREFS_KEY, {}))
 const omemoHandshakeByPeer = ref({}) // peerId -> idle|pending|ready|failed
+const omemoHandshakeTimers = new Map() // peerId -> { timeoutId, retryIntervalId, attempts }
 
 const isNative = Capacitor.isNativePlatform()
 const persisted = loadJson(PROFILE_KEY, null)
@@ -191,20 +192,78 @@ function getThreadEncryptionEnabled(threadKey) {
   return Boolean(encryptionByThread.value[threadKey])
 }
 
+function clearHandshakeTimers(peerId) {
+  const timers = omemoHandshakeTimers.get(peerId)
+  if (timers) {
+    if (timers.timeoutId) clearTimeout(timers.timeoutId)
+    if (timers.retryIntervalId) clearInterval(timers.retryIntervalId)
+    omemoHandshakeTimers.delete(peerId)
+  }
+}
+
 async function ensureOmemoForPeer(peerId) {
   if (!peerId) return false
   if (hasSession(peerId)) {
+    clearHandshakeTimers(peerId)
     omemoHandshakeByPeer.value[peerId] = 'ready'
     omemoSessions.value = new Set([...omemoSessions.value, peerId])
     return true
   }
 
+  // Clear any existing timers
+  clearHandshakeTimers(peerId)
+
   omemoHandshakeByPeer.value[peerId] = 'pending'
+  console.log(`[OMEMO] Starting handshake with peer ${peerId}`)
+
   try {
-    await broadcastOwnKeyBundle()
+    // Send our key bundle directly to the peer
+    await sendKeyBundleToPeer(peerId)
+    // Request peer's key bundle
+    await requestPeerKeyBundle(peerId)
+    console.log(`[OMEMO] Sent initial key exchange to peer ${peerId}`)
+
+    // Set up retry mechanism (every 3 seconds, max 3 attempts)
+    let attempts = 1
+    const retryIntervalId = setInterval(async () => {
+      if (hasSession(peerId)) {
+        clearHandshakeTimers(peerId)
+        return
+      }
+
+      attempts++
+      if (attempts > 3) {
+        clearHandshakeTimers(peerId)
+        omemoHandshakeByPeer.value[peerId] = 'failed'
+        console.warn(`[OMEMO] Handshake failed after 3 attempts for peer ${peerId}`)
+        return
+      }
+
+      console.log(`[OMEMO] Retry attempt ${attempts}/3 for peer ${peerId}`)
+      try {
+        await sendKeyBundleToPeer(peerId)
+        await requestPeerKeyBundle(peerId)
+      } catch (e) {
+        console.warn(`[OMEMO] Retry ${attempts} failed for peer ${peerId}:`, e)
+      }
+    }, 3000)
+
+    // Set up timeout (10 seconds total)
+    const timeoutId = setTimeout(() => {
+      if (!hasSession(peerId)) {
+        clearHandshakeTimers(peerId)
+        omemoHandshakeByPeer.value[peerId] = 'failed'
+        console.warn(`[OMEMO] Handshake timeout (10s) for peer ${peerId}`)
+      }
+    }, 10000)
+
+    omemoHandshakeTimers.set(peerId, { timeoutId, retryIntervalId, attempts })
+
     return false
-  } catch {
+  } catch (e) {
+    clearHandshakeTimers(peerId)
     omemoHandshakeByPeer.value[peerId] = 'failed'
+    console.warn(`[OMEMO] Handshake init failed for peer ${peerId}:`, e)
     return false
   }
 }
@@ -221,6 +280,12 @@ async function setThreadEncryption(threadKey, enabled) {
   const next = { ...encryptionByThread.value }
   delete next[threadKey]
   encryptionByThread.value = next
+
+  // Clear handshake timers when encryption is disabled
+  const peerId = getPeerIdFromThread(threadKey)
+  if (peerId) {
+    clearHandshakeTimers(peerId)
+  }
 }
 
 async function startMesh() {
@@ -297,6 +362,11 @@ async function stopMesh() {
   }
   peers.value = []
   meshState.value = 'stopped'
+
+  // Clear all handshake timers
+  for (const peerId of omemoHandshakeTimers.keys()) {
+    clearHandshakeTimers(peerId)
+  }
 }
 
 async function sendEnvelope(envelope) {
@@ -317,6 +387,37 @@ async function broadcastOwnKeyBundle() {
       deviceId: nodeId.value,
       ts: Date.now()
     },
+    sig: ''
+  }
+  await sendEnvelope(env)
+}
+
+async function sendKeyBundleToPeer(peerId) {
+  const publicKey = await getOwnPublicKeyB64()
+  const env = {
+    msgId: nextMsgId('kb'),
+    from: nodeId.value,
+    to: peerId,
+    ttl: 8,
+    type: 'OMEMO_KEY_BUNDLE',
+    payload: {
+      publicKey,
+      deviceId: nodeId.value,
+      ts: Date.now()
+    },
+    sig: ''
+  }
+  await sendEnvelope(env)
+}
+
+async function requestPeerKeyBundle(peerId) {
+  const env = {
+    msgId: nextMsgId('kreq'),
+    from: nodeId.value,
+    to: peerId,
+    ttl: 8,
+    type: 'OMEMO_KEY_REQUEST',
+    payload: { ts: Date.now() },
     sig: ''
   }
   await sendEnvelope(env)
@@ -421,22 +522,39 @@ function onMeshEnvelope(envelope) {
 
   const payload = envelope.payload || {}
 
+  if (envelope.type === 'OMEMO_KEY_REQUEST') {
+    // Peer is requesting our key bundle – send it directly to them
+    console.log(`[OMEMO] Received key request from peer ${envelope.from}`)
+    sendKeyBundleToPeer(envelope.from).catch((e) =>
+      console.warn('[OMEMO] Failed to reply with key bundle:', e)
+    )
+    return
+  }
+
   if (envelope.type === 'OMEMO_KEY_BUNDLE') {
     const { publicKey, deviceId } = payload
     const peerId = deviceId || envelope.from
+    console.log(`[OMEMO] Received key bundle from peer ${peerId}`)
     if (peerId && publicKey) {
       processKeyBundle(peerId, publicKey)
         .then(() => {
           if (hasSession(peerId)) {
+            clearHandshakeTimers(peerId)
             omemoSessions.value = new Set([...omemoSessions.value, peerId])
             omemoHandshakeByPeer.value[peerId] = 'ready'
-            // Reply with our own key bundle so the peer can also establish a session
-            broadcastOwnKeyBundle().catch((e) => console.warn('OMEMO: failed to send own key bundle:', e))
+            console.log(`[OMEMO] ✓ Session established with peer ${peerId}`)
+            // Send our key bundle back if we haven't established session yet
+            if (!hasSession(envelope.from)) {
+              sendKeyBundleToPeer(envelope.from).catch((e) =>
+                console.warn('[OMEMO] Failed to send key bundle back:', e)
+              )
+            }
           }
         })
         .catch((e) => {
+          clearHandshakeTimers(peerId)
           omemoHandshakeByPeer.value[peerId] = 'failed'
-          console.warn('OMEMO: processKeyBundle failed:', e)
+          console.warn('[OMEMO] processKeyBundle failed:', e)
         })
     }
     return
