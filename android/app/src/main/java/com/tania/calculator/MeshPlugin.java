@@ -78,7 +78,8 @@ public class MeshPlugin extends Plugin {
     private static final String TAG = "MeshPlugin";
     private static final String MDNS_TYPE = "_hexmesh._udp.";
     private static final String TRANSPORT_LAN = "lan";
-    private static final String TRANSPORT_BLE = "ble";
+    private static final String TRANSPORT_BLE = "ble"; // legacy alias
+    private static final String TRANSPORT_BLUETOOTH = "bluetooth";
     private static final String TRANSPORT_HYBRID = "hybrid";
     private static final ParcelUuid BLE_SERVICE_UUID = ParcelUuid.fromString("12345678-1234-5678-1234-56789abc0001");
 
@@ -117,6 +118,9 @@ public class MeshPlugin extends Plugin {
         nodeId = call.getString("nodeId", "n-" + UUID.randomUUID().toString().substring(0, 8));
         displayName = call.getString("displayName", "User");
         transportMode = call.getString("transport", TRANSPORT_LAN);
+        if (TRANSPORT_BLE.equals(transportMode)) {
+            transportMode = TRANSPORT_BLUETOOTH;
+        }
         udpPort = call.getInt("udpPort", 41234);
         capabilities = parseCapabilities(call.getArray("capabilities"));
 
@@ -155,7 +159,7 @@ public class MeshPlugin extends Plugin {
     @PluginMethod
     public void sendPacket(PluginCall call) {
         if (!isLanEnabled()) {
-            call.reject("BLE transport currently supports discovery only. Data packets require LAN/hybrid mode.");
+            call.reject("Bluetooth transport currently supports discovery only. Data packets require LAN/hybrid mode.");
             return;
         }
 
@@ -224,7 +228,7 @@ public class MeshPlugin extends Plugin {
     }
 
     private boolean isBleEnabled() {
-        return TRANSPORT_BLE.equals(transportMode) || TRANSPORT_HYBRID.equals(transportMode);
+        return TRANSPORT_BLUETOOTH.equals(transportMode) || TRANSPORT_BLE.equals(transportMode) || TRANSPORT_HYBRID.equals(transportMode);
     }
 
     private void startBle() {
