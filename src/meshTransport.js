@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core'
-import Mesh from './mesh'
+import Mesh from './mesh.js'
 
 export function createMeshTransport(config) {
   const isNative = Capacitor.isNativePlatform()
@@ -68,6 +68,14 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
 
 function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl, transportMode }) {
   let ws = null
+  let connectTimeout = null
+
+  function clearConnectTimeout() {
+    if (connectTimeout) {
+      clearTimeout(connectTimeout)
+      connectTimeout = null
+    }
+  }
 
   return {
     async start() {
@@ -78,6 +86,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
 
         const normalizedTransport = transportMode === 'ble' ? 'bluetooth' : (transportMode || 'hybrid')
         ws.onopen = () => {
+          clearConnectTimeout()
           ws.send(
             JSON.stringify({
               action: 'start',
@@ -118,10 +127,11 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
         }
 
         ws.onclose = () => {
+          clearConnectTimeout()
           onState('stopped')
         }
 
-        setTimeout(() => {
+        connectTimeout = setTimeout(() => {
           if (!ws || ws.readyState !== WebSocket.OPEN) {
             reject(new Error('Bridge connect timeout'))
           }
@@ -130,6 +140,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
     },
 
     async stop() {
+      clearConnectTimeout()
       if (ws) {
         try {
           ws.send(JSON.stringify({ action: 'stop' }))
