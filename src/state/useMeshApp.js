@@ -304,6 +304,11 @@ async function setThreadEncryption(threadKey, enabled) {
       throw new Error('Сначала подключитесь к сети')
     }
 
+    // Check that OMEMO is available
+    if (!omemoReady) {
+      throw new Error('Шифрование недоступно. Требуется HTTPS или localhost для работы Web Crypto API.')
+    }
+
     encryptionByThread.value = { ...encryptionByThread.value, [threadKey]: true }
     const peerId = getPeerIdFromThread(threadKey)
     await ensureOmemoForPeer(peerId)
@@ -392,6 +397,16 @@ async function startMesh() {
     } catch (e) {
       console.warn('OMEMO init failed:', e)
       omemoReady = false
+
+      // Show user-friendly warning about OMEMO not being available
+      if (e.message && e.message.includes('Web Crypto API')) {
+        console.warn(
+          '⚠️ OMEMO шифрование отключено: требуется HTTPS или localhost.\n' +
+          'Вы можете продолжить использование без шифрования.'
+        )
+        // Store warning to display in UI if needed
+        meshError.value = 'Внимание: шифрование недоступно (требуется HTTPS). Работа без шифрования.'
+      }
     }
 
     return true

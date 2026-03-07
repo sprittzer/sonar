@@ -53,6 +53,14 @@ if (_bc) {
  * Must be called before any other function.
  */
 export async function initOmemo() {
+  // Check if Web Crypto API is available (requires HTTPS or localhost)
+  if (!window.crypto || !window.crypto.subtle) {
+    throw new Error(
+      'Web Crypto API недоступен. OMEMO шифрование требует HTTPS или localhost. ' +
+      'Текущий URL: ' + window.location.href
+    )
+  }
+
   const stored = localStorage.getItem(OMEMO_KEYS_STORAGE)
   if (stored) {
     try {
