@@ -40,6 +40,7 @@ const persisted = loadJson(PROFILE_KEY, null)
 const localName = ref(persisted?.localName || 'User')
 const nodeId = ref(persisted?.nodeId || `u-${Math.random().toString(16).slice(2, 10)}`)
 const bridgeUrl = ref(persisted?.bridgeUrl || 'ws://127.0.0.1:8788')
+const signalRoom = ref(persisted?.signalRoom || 'default')
 const normalizedTransport = persisted?.transportMode === 'ble' ? 'bluetooth' : persisted?.transportMode
 const transportMode = ref(normalizedTransport || 'hybrid')
 const stunUrl = ref(persisted?.stunUrl || 'stun:stun.freeswitch.org:3478')
@@ -48,11 +49,12 @@ const turnUsername = ref(persisted?.turnUsername || 'test')
 const turnCredential = ref(persisted?.turnCredential || 'secret')
 
 watch(encryptionByThread, () => saveJson(ENCRYPTION_PREFS_KEY, encryptionByThread.value), { deep: true })
-watch([localName, nodeId, bridgeUrl, transportMode, stunUrl, turnUrl, turnUsername, turnCredential], () => {
+watch([localName, nodeId, bridgeUrl, signalRoom, transportMode, stunUrl, turnUrl, turnUsername, turnCredential], () => {
   saveJson(PROFILE_KEY, {
     localName: localName.value,
     nodeId: nodeId.value,
     bridgeUrl: bridgeUrl.value,
+    signalRoom: signalRoom.value,
     transportMode: transportMode.value,
     stunUrl: stunUrl.value,
     turnUrl: turnUrl.value,
@@ -337,6 +339,7 @@ async function startMesh() {
       displayName: localName.value,
       capabilities: ['chat', 'signal', 'av', 'group'],
       bridgeUrl: bridgeUrl.value,
+      signalRoom: signalRoom.value,
       transportMode: transportMode.value,
       onPeers(nextPeers) {
         peers.value = nextPeers || []
@@ -1034,6 +1037,7 @@ export function useMeshApp() {
     localName,
     nodeId,
     bridgeUrl,
+    signalRoom,
     stunUrl,
     turnUrl,
     turnUsername,

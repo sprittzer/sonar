@@ -66,9 +66,10 @@ function createNativeTransport({ nodeId, displayName, capabilities, onPeers, onP
   }
 }
 
-function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl, transportMode }) {
+function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onPacket, onState, onError, bridgeUrl, transportMode, signalRoom }) {
   let ws = null
   let connectTimeout = null
+  const signalingPeers = new Map()
 
   function clearConnectTimeout() {
     if (connectTimeout) {
@@ -77,16 +78,37 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
     }
   }
 
+  function normalizeWsUrl(raw) {
+    const url = String(raw || '').trim()
+    if (!url) return url
+    if (url.startsWith('http://')) return `ws://${url.slice('http://'.length)}`
+    if (url.startsWith('https://')) return `wss://${url.slice('https://'.length)}`
+    return url
+  }
+
+  function emitSignalingPeers() {
+    const peers = [...signalingPeers.values()].map((p) => ({
+      nodeId: p.nodeId,
+      displayName: p.name || p.displayName || p.nodeId,
+      address: p.address || 'signal-server',
+      port: p.port || -1,
+      capabilities: p.capabilities || ['signal'],
+      lastSeenMs: Date.now()
+    }))
+    onPeers(peers)
+  }
+
   return {
     async start() {
       await this.stop()
 
       return new Promise((resolve, reject) => {
-        ws = new WebSocket(bridgeUrl)
+        ws = new WebSocket(normalizeWsUrl(bridgeUrl))
 
         const normalizedTransport = transportMode === 'ble' ? 'bluetooth' : (transportMode || 'hybrid')
         ws.onopen = () => {
           clearConnectTimeout()
+          // Protocol A: local helper bridge
           ws.send(
             JSON.stringify({
               action: 'start',
@@ -94,6 +116,16 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
             })
           )
           ws.send(JSON.stringify({ action: 'getPeers' }))
+
+          // Protocol B: signaling server (same as signaling/lan-server.mjs)
+          ws.send(
+            JSON.stringify({
+              type: 'join',
+              roomId: signalRoom || 'default',
+              nodeId,
+              name: displayName
+            })
+          )
           resolve()
         }
 
@@ -119,6 +151,32 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
 
           if (msg.event === 'meshPacket') {
             onPacket(msg.payload?.envelope)
+          }
+
+          if (msg.type === 'peers') {
+            signalingPeers.clear()
+            for (const p of msg.peers || []) {
+              if (!p?.nodeId || p.nodeId === nodeId) continue
+              signalingPeers.set(p.nodeId, p)
+            }
+            emitSignalingPeers()
+          }
+
+          if (msg.type === 'peer-joined' && msg.peer?.nodeId && msg.peer.nodeId !== nodeId) {
+            signalingPeers.set(msg.peer.nodeId, msg.peer)
+            emitSignalingPeers()
+          }
+
+          if (msg.type === 'peer-left' && msg.nodeId) {
+            signalingPeers.delete(msg.nodeId)
+            emitSignalingPeers()
+          }
+
+          if (msg.type === 'signal') {
+            const payload = msg.payload || {}
+            if (payload.kind === 'MESH' && payload.envelope) {
+              onPacket(payload.envelope)
+            }
           }
         }
 
@@ -150,6 +208,7 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
         ws.close()
         ws = null
       }
+      signalingPeers.clear()
       onState('stopped')
     },
 
@@ -157,7 +216,16 @@ function createBridgeTransport({ nodeId, displayName, capabilities, onPeers, onP
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         throw new Error('Bridge is not connected')
       }
+      // Protocol A
       ws.send(JSON.stringify({ action: 'sendPacket', payload: { envelope } }))
+      // Protocol B
+      ws.send(
+        JSON.stringify({
+          type: 'signal',
+          to: envelope?.to && envelope.to !== '*' ? envelope.to : undefined,
+          payload: { kind: 'MESH', envelope }
+        })
+      )
     }
   }
 }
