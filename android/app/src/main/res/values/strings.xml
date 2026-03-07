@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Vue Calculator</string>
+    <string name="title_activity_main">Vue Calculator</string>
+    <string name="package_name">com.tania.calculator</string>
+    <string name="custom_url_scheme">com.tania.calculator</string>
+</resources>
