@@ -83,3 +83,15 @@ test('encrypt/decrypt fail without established session', async () => {
   await assert.rejects(e2ee.encryptMessage('bob', 'hello'), /No key for peer bob/)
   await assert.rejects(e2ee.decryptMessage('bob', '001122', 'AA=='), /No key for peer bob/)
 })
+
+test('processKeyBundle rejects key replacement for the same peer id', async () => {
+  installGlobals(createLocalStorage())
+  const e2ee = await importFresh('src/e2ee.js')
+
+  await e2ee.initE2ee({ nodeId: 'alice' })
+  await e2ee.processKeyBundle('bob', '2')
+  await assert.rejects(
+    e2ee.processKeyBundle('bob', '3'),
+    /Identity key changed for peer bob/
+  )
+})

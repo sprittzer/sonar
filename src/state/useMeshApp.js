@@ -90,6 +90,25 @@ const remoteCallStream = ref(null)
 let peerConnection = null
 let pendingRemoteIce = []
 
+function isBluetoothPeer(peer) {
+  if (!peer) return false
+  const addr = String(peer.address || '').toLowerCase()
+  if (addr.startsWith('ble:')) return true
+  const caps = Array.isArray(peer.capabilities) ? peer.capabilities.map((c) => String(c).toLowerCase()) : []
+  return caps.includes('ble') || caps.includes('bluetooth')
+}
+
+function filterPeersByTransport(list) {
+  const peersList = Array.isArray(list) ? list : []
+  if (transportMode.value === 'bluetooth') {
+    return peersList.filter((p) => isBluetoothPeer(p))
+  }
+  if (transportMode.value === 'lan') {
+    return peersList.filter((p) => !isBluetoothPeer(p))
+  }
+  return peersList
+}
+
 async function ensureE2eeInitialized() {
   if (e2eeInitPromise) return e2eeInitPromise
   e2eeInitPromise = initE2ee({ nodeId: nodeId.value }).catch((error) => {
@@ -351,8 +370,13 @@ async function startMesh() {
       signalRoom: signalRoom.value,
       transportMode: transportMode.value,
       onPeers(nextPeers) {
-        log.debug('onPeers', { count: (nextPeers || []).length })
-        peers.value = nextPeers || []
+        const filtered = filterPeersByTransport(nextPeers)
+        log.debug('onPeers', {
+          rawCount: (nextPeers || []).length,
+          filteredCount: filtered.length,
+          transportMode: transportMode.value
+        })
+        peers.value = filtered
 
         peers.value.forEach((peer) => {
           const key = `peer:${peer.nodeId}`
@@ -818,7 +842,14 @@ function onMeshEnvelope(envelope) {
 
   if (envelope.type === 'E2EE_KEY_BUNDLE') {
     const { publicKey, deviceId } = payload
-    const peerId = deviceId || envelope.from
+    if (deviceId && deviceId !== envelope.from) {
+      log.warn('E2EE key bundle rejected: deviceId does not match envelope.from', {
+        from: envelope.from,
+        deviceId
+      })
+      return
+    }
+    const peerId = envelope.from
     if (peerId && publicKey) {
       processKeyBundle(peerId, publicKey)
         .then(() => {

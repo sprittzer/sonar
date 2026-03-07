@@ -101,18 +101,20 @@ test('bridge transport starts, sends control packets, routes inbound events and 
   assert.equal(FakeWebSocket.instances.length, 1)
 
   const ws = FakeWebSocket.instances[0]
-  assert.equal(ws.url, 'ws://127.0.0.1:8788')
+  assert.equal(ws.url, 'ws://127.0.0.1:8788/ws?username=Alice&user_id=alice')
 
   ws.open()
   await started
 
-  assert.equal(ws.sent.length, 2)
+  assert.equal(ws.sent.length, 3)
   const startMessage = JSON.parse(ws.sent[0])
   const getPeersMessage = JSON.parse(ws.sent[1])
+  const pingMessage = JSON.parse(ws.sent[2])
 
   assert.equal(startMessage.action, 'start')
   assert.equal(startMessage.payload.transport, 'bluetooth')
   assert.equal(getPeersMessage.action, 'getPeers')
+  assert.equal(pingMessage.type, 'ping')
 
   ws.emitMessage({ event: 'state', payload: { state: 'running' } })
   ws.emitMessage({ event: 'peersUpdate', payload: { peers: [{ nodeId: 'bob', displayName: 'Bob' }] } })
@@ -123,10 +125,12 @@ test('bridge transport starts, sends control packets, routes inbound events and 
   assert.deepEqual(peersUpdates.at(-1), [{ nodeId: 'bob', displayName: 'Bob' }])
   assert.deepEqual(packets.at(-1), { msgId: 'in-1', type: 'CHAT' })
 
-  await transport.sendPacket({ msgId: 'out-1', type: 'CHAT' })
-  const outboundMessage = JSON.parse(ws.sent.at(-1))
-  assert.equal(outboundMessage.action, 'sendPacket')
-  assert.deepEqual(outboundMessage.payload.envelope, { msgId: 'out-1', type: 'CHAT' })
+  await transport.sendPacket({ msgId: 'out-1', type: 'CHAT', to: 'bob' })
+  const outboundActionMessage = JSON.parse(ws.sent.at(-2))
+  const outboundSignalMessage = JSON.parse(ws.sent.at(-1))
+  assert.equal(outboundActionMessage.action, 'sendPacket')
+  assert.deepEqual(outboundActionMessage.payload.envelope, { msgId: 'out-1', type: 'CHAT', to: 'bob' })
+  assert.equal(outboundSignalMessage.type, 'signal')
 
   await transport.stop()
 
@@ -180,7 +184,7 @@ test('bridge transport start fails fast on connect timeout', async () => {
   }
 })
 
-test('bridge transport forwards websocket errors to callback', async () => {
+test('bridge transport forwards bridge error events to callback', async () => {
   const { createMeshTransport } = await importFresh('src/meshTransport.js')
 
   const errors = []
@@ -205,7 +209,7 @@ test('bridge transport forwards websocket errors to callback', async () => {
   ws.open()
   await started
 
-  ws.emitError()
+  ws.emitMessage({ event: 'error', payload: { message: 'bridge error test' } })
 
-  assert.deepEqual(errors, ['Bridge websocket connection failed'])
+  assert.deepEqual(errors, ['bridge error test'])
 })

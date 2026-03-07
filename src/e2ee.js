@@ -2,6 +2,7 @@
 // Note: this is an educational fallback for environments without crypto.subtle.
 
 const E2EE_KEYS_STORAGE = 'hex_mesh_dh_identity_v1'
+const E2EE_PEER_KEYS_STORAGE = 'hex_mesh_dh_peer_keys_v1'
 
 // 2048-bit MODP Group (RFC 3526, group 14)
 const DH_P = BigInt(
@@ -19,6 +20,41 @@ let publicKey = 0n
 const peerPublicKeys = new Map() // peerId -> bigint
 const sessionSecrets = new Map() // peerId -> hex string
 const sessionListeners = []
+
+function peerStorageBucket() {
+  if (!selfId) return {}
+  try {
+    const raw = localStorage.getItem(E2EE_PEER_KEYS_STORAGE)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function loadPeerKeysFromStorage() {
+  if (!selfId) return
+  peerPublicKeys.clear()
+  sessionSecrets.clear()
+  const bucket = peerStorageBucket()
+  const mine = bucket[selfId] || {}
+  for (const [peerId, keyHex] of Object.entries(mine)) {
+    const key = parseHexBigInt(String(keyHex))
+    if (!key) continue
+    peerPublicKeys.set(peerId, key)
+    const shared = modPow(key, privateKey, DH_P)
+    sessionSecrets.set(peerId, shared.toString(16))
+  }
+}
+
+function persistPeerKey(peerId, peerPub) {
+  if (!selfId || !peerId || !peerPub) return
+  const bucket = peerStorageBucket()
+  const mine = { ...(bucket[selfId] || {}) }
+  mine[peerId] = peerPub.toString(16)
+  bucket[selfId] = mine
+  localStorage.setItem(E2EE_PEER_KEYS_STORAGE, JSON.stringify(bucket))
+}
 
 export async function initE2ee(options = {}) {
   if (options?.nodeId) selfId = String(options.nodeId)
@@ -49,6 +85,7 @@ export async function initE2ee(options = {}) {
       })
     )
   }
+  loadPeerKeysFromStorage()
 }
 
 export async function getOwnPublicKeyB64() {
@@ -65,7 +102,15 @@ export async function processKeyBundle(peerId, publicKeyHex) {
     throw new Error('Invalid peer DH public key.')
   }
 
+  const existing = peerPublicKeys.get(peerId)
+  if (existing && existing !== peerPub) {
+    throw new Error(`Identity key changed for peer ${peerId}. Potential impersonation detected.`)
+  }
+
   peerPublicKeys.set(peerId, peerPub)
+  if (!existing) {
+    persistPeerKey(peerId, peerPub)
+  }
 
   const shared = modPow(peerPub, privateKey, DH_P)
   const secretHex = shared.toString(16)

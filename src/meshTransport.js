@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core'
 import Mesh from './mesh.js'
-import { createLogger } from './logger'
+import { createLogger } from './logger.js'
 
 const DEFAULT_SIGNAL_HOST = '155.212.168.250'
 const log = createLogger('meshTransport')
