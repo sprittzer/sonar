@@ -33,6 +33,8 @@ const omemoSessions = ref(new Set())
 const encryptionByThread = ref(loadJson(ENCRYPTION_PREFS_KEY, {}))
 const omemoHandshakeByPeer = ref({}) // peerId -> idle|pending|ready|failed
 const omemoHandshakeTimers = new Map() // peerId -> { timeoutId, retryIntervalId, attempts }
+let omemoReady = false
+const pendingKeyRequests = [] // Queue of peerIds requesting keys before OMEMO is ready
 
 const isNative = Capacitor.isNativePlatform()
 const persisted = loadJson(PROFILE_KEY, null)
@@ -335,6 +337,8 @@ async function startMesh() {
     // Initialise OMEMO and broadcast our public key bundle to all peers
     try {
       await initOmemo()
+      omemoReady = true
+      console.log('[OMEMO] Initialised successfully')
 
       // Re-establish sessions when another tab shares a key bundle
       onSessionEstablished((peerId) => {
@@ -343,8 +347,20 @@ async function startMesh() {
       })
 
       await broadcastOwnKeyBundle()
+
+      // Process any pending key requests that arrived before OMEMO was ready
+      if (pendingKeyRequests.length > 0) {
+        console.log(`[OMEMO] Processing ${pendingKeyRequests.length} pending key request(s)`)
+        for (const peerId of pendingKeyRequests) {
+          await sendKeyBundleToPeer(peerId).catch((e) =>
+            console.warn(`[OMEMO] Failed to send key bundle to queued peer ${peerId}:`, e)
+          )
+        }
+        pendingKeyRequests.length = 0
+      }
     } catch (e) {
       console.warn('OMEMO init failed:', e)
+      omemoReady = false
     }
 
     return true
@@ -362,6 +378,8 @@ async function stopMesh() {
   }
   peers.value = []
   meshState.value = 'stopped'
+  omemoReady = false
+  pendingKeyRequests.length = 0
 
   // Clear all handshake timers
   for (const peerId of omemoHandshakeTimers.keys()) {
@@ -393,6 +411,10 @@ async function broadcastOwnKeyBundle() {
 }
 
 async function sendKeyBundleToPeer(peerId) {
+  if (!omemoReady) {
+    console.warn(`[OMEMO] Cannot send key bundle to ${peerId}: OMEMO not ready yet`)
+    return
+  }
   const publicKey = await getOwnPublicKeyB64()
   const env = {
     msgId: nextMsgId('kb'),
@@ -411,6 +433,10 @@ async function sendKeyBundleToPeer(peerId) {
 }
 
 async function requestPeerKeyBundle(peerId) {
+  if (!omemoReady) {
+    console.warn(`[OMEMO] Cannot request key bundle from ${peerId}: OMEMO not ready yet`)
+    return
+  }
   const env = {
     msgId: nextMsgId('kreq'),
     from: nodeId.value,
@@ -525,6 +551,11 @@ function onMeshEnvelope(envelope) {
   if (envelope.type === 'OMEMO_KEY_REQUEST') {
     // Peer is requesting our key bundle – send it directly to them
     console.log(`[OMEMO] Received key request from peer ${envelope.from}`)
+    if (!omemoReady) {
+      console.log(`[OMEMO] Queueing key request from ${envelope.from} (OMEMO not ready yet)`)
+      pendingKeyRequests.push(envelope.from)
+      return
+    }
     sendKeyBundleToPeer(envelope.from).catch((e) =>
       console.warn('[OMEMO] Failed to reply with key bundle:', e)
     )
