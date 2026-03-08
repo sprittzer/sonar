@@ -3,6 +3,9 @@
 Видеодемо можно получить по ссылке:
 https://disk.yandex.ru/i/LxUjyG0Rb8Pm3A
 
+Презентация:
+https://docs.google.com/presentation/d/1eI0FZbT0-mullXrPCd2NMfGDgOpUPXdeRi8TRWNygDQ/edit?usp=sharing
+
 Одна кодовая база, два режима:
 - Android APK: нативный mesh plugin (mDNS + UDP + gossip)
 - Browser: локальный helper bridge, который использует ту же сеть (mDNS + UDP + gossip)
